@@ -28,6 +28,7 @@ from nemo.collections.asr.data import audio_to_text_dataset
 from nemo.collections.asr.data.av_to_text import _AVTextDataset
 # from nemo.collections.asr.data.audio_to_text_dali import AudioToCharDALIDataset, DALIOutputs
 # from nemo.collections.asr.data.audio_to_text_lhotse import LhotseSpeechToTextBpeDataset
+from nemo.collections.asr.models.ctc_models import EncDecCTCModel
 from nemo.collections.asr.losses.ctc import CTCLoss
 from nemo.collections.asr.metrics.wer import WER
 from nemo.collections.asr.models.asr_model import ASRModel, ExportableEncDecModel
@@ -43,10 +44,10 @@ from nemo.core.classes.mixins import AccessMixin
 from nemo.core.neural_types import AudioSignal, LabelsType, LengthsType, LogprobsType, NeuralType, SpectrogramType, ImageFeatureValue
 from nemo.utils import logging
 
-__all__ = ['EncDecCTCModel']
+__all__ = ['AV_EncDecCTCModel']
 
 
-class EncDecCTCModel(ASRModel, ExportableEncDecModel, ASRModuleMixin, InterCTCMixin, ASRTranscriptionMixin):
+class AV_EncDecCTCModel(ASRModel, ExportableEncDecModel, ASRModuleMixin, InterCTCMixin, ASRTranscriptionMixin):
     """Base class for encoder decoder CTC-based models."""
 
     def __init__(self, cfg: DictConfig, trainer: Trainer = None):
@@ -56,7 +57,7 @@ class EncDecCTCModel(ASRModel, ExportableEncDecModel, ASRModuleMixin, InterCTCMi
         if trainer is not None:
             self.world_size = trainer.world_size
 
-        super().__init__(cfg=cfg.a_model, trainer=trainer)
+        super().__init__(cfg=cfg, trainer=trainer)
 
         self.a_model = EncDecCTCModel.from_pretrained(cfg.a_model_name)
         with open_dict(self._cfg):
@@ -76,18 +77,18 @@ class EncDecCTCModel(ASRModel, ExportableEncDecModel, ASRModuleMixin, InterCTCMi
                 cfg.decoder["num_classes"] = len(self.cfg.decoder.vocabulary)
 
         # initialize a transformer encoder and decoder
-        self.a_linear = torch.nn.Linear(in_features = self.a_model.decoder._feat_in, out_features = self.cfg.av_encoder.d_model)
-        self.v_linear = torch.nn.Linear(in_features = self.cfg.v_model.decoder._feat_in, out_features = self.cfg.av_encoder.d_model)
+        self.a_linear = torch.nn.Linear(in_features = self.a_model.encoder._feat_out, out_features = self.cfg.av_encoder.d_model)
+        self.v_linear = torch.nn.Linear(in_features = self.cfg.v_model.feat_dim, out_features = self.cfg.av_encoder.d_model)
         self.av_enocder_layer = torch.nn.TransformerEncoderLayer(d_model = self.cfg.av_encoder.d_model, nhead = self.cfg.av_encoder.nhead, dropout = self.cfg.av_encoder.dropout, batch_first=True)
         self.av_encoder = torch.nn.TransformerEncoder(self.av_enocder_layer, num_layers = self.cfg.av_encoder.num_layers)
         
         # Modality embeddings
-        self.a_modal_embs = torch.nn.Embedding(1, self.cfg.av_decoder.d_model)
-        self.v_modal_embs = torch.nn.Embedding(1, self.cfg.av_decoder.d_model)
+        self.a_modal_embs = torch.nn.Embedding(1, self.cfg.av_encoder.d_model)
+        self.v_modal_embs = torch.nn.Embedding(1, self.cfg.av_encoder.d_model)
         
         # Trainable positional encodings
-        self.a_pos_enc = torch.nn.Embedding(10000, self.cfg.av_decoder.d_model)
-        self.v_pos_enc = torch.nn.Embedding(10000, self.cfg.av_decoder.d_model)
+        # self.a_pos_enc = torch.nn.Embedding(10000, self.cfg.decoder.feat_in)
+        # self.v_pos_enc = torch.nn.Embedding(10000, self.cfg.decoder.feat_in)
         
         # self.av_decoder_layer = torch.nn.TransformerDecoderLayer(d_model = self.cfg.av_decoder.d_model, nhead = self.cfg.av_decoder.nhead, dropout = self.cfg.av_decoder.dropout, batch_first=True)
         # self.av_decoder = torch.nn.TransformerDecoder(self.av_decoder_layer, num_layers = self.cfg.av_decoder.num_layers)
@@ -101,7 +102,7 @@ class EncDecCTCModel(ASRModel, ExportableEncDecModel, ASRModuleMixin, InterCTCMi
         )
         
         # Setup decoding objects
-        # decoding_cfg = self.cfg.get('decoding', None)
+        decoding_cfg = self.cfg.get('decoding', None)
 
         # In case decoding config not found, use default config
         if decoding_cfg is None:
@@ -427,14 +428,14 @@ class EncDecCTCModel(ASRModel, ExportableEncDecModel, ASRModuleMixin, InterCTCMi
 
     @property
     def input_types(self) -> Optional[Dict[str, NeuralType]]:
-        if hasattr(self.preprocessor, '_sample_rate'):
-            input_signal_eltype = AudioSignal(freq=self.preprocessor._sample_rate)
+        if hasattr(self.a_model.preprocessor, '_sample_rate'):
+            input_signal_eltype = AudioSignal(freq=self.a_model.preprocessor._sample_rate)
         else:
             input_signal_eltype = AudioSignal()
         return {
             "audio_input_signal": NeuralType(('B', 'T'), input_signal_eltype, optional=True),
             "audio_input_signal_length": NeuralType(tuple('B'), LengthsType(), optional=True),
-            "video_input_signal": NeuralType(('B', 'F', 'D'), ImageFeatureValue(), optional=True),
+            "video_input_signal": NeuralType(('B', 'T', 'D'), ImageFeatureValue(), optional=True),
             "processed_signal": NeuralType(('B', 'D', 'T'), SpectrogramType(), optional=True),
             "processed_signal_length": NeuralType(tuple('B'), LengthsType(), optional=True),
             "sample_id": NeuralType(tuple('B'), LengthsType(), optional=True),
@@ -450,7 +451,7 @@ class EncDecCTCModel(ASRModel, ExportableEncDecModel, ASRModuleMixin, InterCTCMi
 
     @typecheck()
     def forward(
-        self, audio_input=None, audio_input_signal_length=None, video_input_signal= None, processed_signal=None, processed_signal_length=None
+        self, audio_input_signal=None, audio_input_signal_length=None, video_input_signal= None, processed_signal=None, processed_signal_length=None
     ):
         """
         Forward pass of the model.
@@ -472,7 +473,7 @@ class EncDecCTCModel(ASRModel, ExportableEncDecModel, ASRModuleMixin, InterCTCMi
             2) The lengths of the acoustic sequence after propagation through the encoder, of shape [B].
             3) The greedy token predictions of the model of shape [B, T] (via argmax)
         """
-        has_input_signal = audio_input is not None and audio_input_signal_length is not None
+        has_input_signal = audio_input_signal is not None and audio_input_signal_length is not None
         has_processed_signal = processed_signal is not None and processed_signal_length is not None
         if (has_input_signal ^ has_processed_signal) == False:
             raise ValueError(
@@ -481,15 +482,16 @@ class EncDecCTCModel(ASRModel, ExportableEncDecModel, ASRModuleMixin, InterCTCMi
             )
 
         if not has_processed_signal:
-            processed_signal, processed_signal_length = self.preprocessor(
-                audio_input=audio_input, length=audio_input_signal_length,
+            processed_signal, processed_signal_length = self.a_model.preprocessor(
+                input_signal=audio_input_signal, length=audio_input_signal_length,
             )
 
-        if self.spec_augmentation is not None and self.training:
-            processed_signal = self.spec_augmentation(input_spec=processed_signal, length=processed_signal_length)
+        if self.a_model.spec_augmentation is not None and self.training:
+            processed_signal = self.a_model.spec_augmentation(input_spec=processed_signal, length=processed_signal_length)
 
-        encoder_output = self.encoder(audio_signal=processed_signal, length=processed_signal_length)
-        encoded = encoder_output[0]
+        encoder_output = self.a_model.encoder(audio_signal=processed_signal, length=processed_signal_length)
+        # B,C,T -> B,T,C
+        encoded = encoder_output[0].permute(0, 2, 1)
         encoded_len = encoder_output[1]
         a_encoded = self.a_linear(encoded)
         v_encoded = self.v_linear(video_input_signal)
@@ -498,17 +500,24 @@ class EncDecCTCModel(ASRModel, ExportableEncDecModel, ASRModuleMixin, InterCTCMi
         B, T, C = a_encoded.size()
         B, F, D = v_encoded.size()
         assert C == D, "The audio and video features must have the same dimensionality"
-        a_encoded = a_encoded + self.a_modal_embs.to(a_encoded.device).repeat(B, T, 1)
-        v_encoded = v_encoded + self.v_modal_embs.to(v_encoded.device).repeat(B, F, 1)
+        
+        # Expand modality embeddings to match the dimensions of a_encoded and v_encoded
+        a_modal_emb_expanded = self.a_modal_embs.weight.expand(B, T, -1)  # Shape: (B, T, feat_in)
+        v_modal_emb_expanded = self.v_modal_embs.weight.expand(B, F, -1)  # Shape: (B, F, feat_in)
+        
+        a_encoded = a_encoded + a_modal_emb_expanded
+        v_encoded = v_encoded + v_modal_emb_expanded
         
         # Add positional encodings
-        a_encoded = a_encoded + self.a_pos_enc.to(a_encoded.device).repeat(B, T, 1)
-        v_encoded = v_encoded + self.v_pos_enc.to(v_encoded.device).repeat(B, F, 1)
+        # a_encoded = a_encoded + self.a_pos_enc.to(a_encoded.device).repeat(B, T, 1)
+        # v_encoded = v_encoded + self.v_pos_enc.to(v_encoded.device).repeat(B, F, 1)
         
         # Concat and pass them through the transformer encoder
         av_encoded = torch.cat((a_encoded, v_encoded), dim=1)
         av_encoded = self.av_encoder(av_encoded)
         
+        # B,T,C -> B,C,T
+        av_encoded = av_encoded.permute(0, 2, 1)
         log_probs = self.decoder(encoder_output=av_encoded)
         greedy_predictions = log_probs.argmax(dim=-1, keepdim=False)
 
@@ -533,7 +542,7 @@ class EncDecCTCModel(ASRModel, ExportableEncDecModel, ASRModuleMixin, InterCTCMi
         #         processed_signal=signal, processed_signal_length=signal_len
         #     )
         # else:
-        log_probs, encoded_len, predictions = self.forward(audio_input=signal, audio_input_signal_length=signal_len, video_input_signal=video_input_signal)
+        log_probs, encoded_len, predictions = self.forward(audio_input_signal=signal, audio_input_signal_length=signal_len, video_input_signal=video_input_signal)
 
         if hasattr(self, '_trainer') and self._trainer is not None:
             log_every_n_steps = self._trainer.log_every_n_steps
@@ -583,7 +592,7 @@ class EncDecCTCModel(ASRModel, ExportableEncDecModel, ASRModuleMixin, InterCTCMi
         #         processed_signal=signal, processed_signal_length=signal_len
         #     )
         # else:
-        log_probs, encoded_len, predictions = self.forward(audio_input=signal, audio_input_signal_length=signal_len, video_input_signal=video_input_signal)
+        log_probs, encoded_len, predictions = self.forward(audio_input_signal=signal, audio_input_signal_length=signal_len, video_input_signal=video_input_signal)
 
         transcribed_texts, _ = self.wer.decoding.ctc_decoder_predictions_tensor(
             decoder_outputs=log_probs, decoder_lengths=encoded_len, return_hypotheses=False,
@@ -602,7 +611,7 @@ class EncDecCTCModel(ASRModel, ExportableEncDecModel, ASRModuleMixin, InterCTCMi
         #         processed_signal=signal, processed_signal_length=signal_len
         #     )
         # else:
-        log_probs, encoded_len, predictions = self.forward(audio_input=signal, audio_input_signal_length=signal_len, video_input_signal=video_input_signal)
+        log_probs, encoded_len, predictions = self.forward(audio_input_signal=signal, audio_input_signal_length=signal_len, video_input_signal=video_input_signal)
 
         loss_value = self.loss(
             log_probs=log_probs, targets=transcript, input_lengths=encoded_len, target_lengths=transcript_len
@@ -741,7 +750,7 @@ class EncDecCTCModel(ASRModel, ExportableEncDecModel, ASRModuleMixin, InterCTCMi
 
         dl_config = {
             'manifest_filepath': manifest_filepath,
-            'sample_rate': self.preprocessor._sample_rate,
+            'sample_rate': self.a_model.preprocessor._sample_rate,
             'labels': OmegaConf.to_container(self.decoder.vocabulary),
             'batch_size': batch_size,
             'trim_silence': False,

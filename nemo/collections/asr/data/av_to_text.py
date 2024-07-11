@@ -106,11 +106,10 @@ def _speech_collate_fn(batch, pad_id):
     tokens = torch.stack(tokens)
     tokens_lengths = torch.stack(tokens_lengths)
     if sample_ids is None:
-        return audio_signal, audio_lengths, tokens, tokens_lengths
+        return audio_signal, audio_lengths, video_feat_signal, tokens, tokens_lengths
     else:
         sample_ids = torch.tensor(sample_ids, dtype=torch.int32)
         return audio_signal, audio_lengths, video_feat_signal, tokens, tokens_lengths, sample_ids
-
 
 class ASR_AV_ManifestProcessor:
     """
@@ -345,12 +344,12 @@ class _AVTextDataset(Dataset):
         """Returns definitions of module output ports.
                """
         return {
-            'audio_signal': NeuralType(('B', 'T'), AudioSignal()),
-            'a_sig_length': NeuralType(tuple('B'), LengthsType()),
-            'video_signal': NeuralType(('B', 'F', 'D'), ImageFeatureValue()),
-            'transcripts': NeuralType(('B', 'T'), LabelsType()),
-            'transcript_length': NeuralType(tuple('B'), LengthsType()),
-            'sample_id': NeuralType(tuple('B'), LengthsType(), optional=True),
+            'audio_signal': [NeuralType(('B', 'T'), AudioSignal())],
+            'a_sig_length': [NeuralType(tuple('B'), LengthsType())],
+            'video_input_signal': [NeuralType(('B', 'T', 'D'), ChannelType())],
+            'transcripts': [NeuralType(('B', 'T'), LabelsType())],
+            'transcript_length': [NeuralType(tuple('B'), LengthsType())],
+            'sample_id': [NeuralType(tuple('B'), LengthsType(), optional=True)],
         }
 
     def __init__(
@@ -369,7 +368,7 @@ class _AVTextDataset(Dataset):
         pad_id: int = 0,
         return_sample_id: bool = False,
         channel_selector: Optional[ChannelSelectorType] = None,
-        video_frame_rate: int = 3,
+        video_frame_rate: int = 5,
     ):
         if type(manifest_filepath) == str:
             manifest_filepath = manifest_filepath.split(",")
@@ -428,15 +427,18 @@ class _AVTextDataset(Dataset):
         vf = np.load(sample.video_featfile)
         # uniformly sample self.video_frame_rate frames from video at shape 0.
         # TODO: @Balu, how would you do this, if you one frame rate then you should make many dirs with different frame rates.
-        assert vf.shape[0] == self.video_frame_rate, f"Video feature file {sample.video_featfile} has {vf.shape[0]} frame_feats, expected {self.video_frame_rate}"
+        assert vf.shape[0] == self.video_frame_rate*sample.duration, f"Video feature file {sample.video_featfile} has {vf.shape[0]} frame_feats, expected {self.video_frame_rate}"
 
         t, tl = self.manifest_processor.process_text_by_sample(sample=sample)
 
+        vf = torch.from_numpy(vf)
+        # make it torch float
+        vf = vf.float()
         if self.return_sample_id:
-            output = f, fl, torch.from_numpy(vf), torch.tensor(
+            output = f, fl, vf, torch.tensor(
                 t).long(), torch.tensor(tl).long(), index
         else:
-            output = f, fl, torch.from_numpy(vf), torch.tensor(
+            output = f, fl, vf, torch.tensor(
                 t).long(), torch.tensor(tl).long()
 
         return output
@@ -489,7 +491,7 @@ class AVToCharDataset(_AVTextDataset):
         return {
             'audio_signal': NeuralType(('B', 'T'), AudioSignal()),
             'a_sig_length': NeuralType(tuple('B'), LengthsType()),
-            'video_signal': NeuralType(('B', 'F', 'D'), ImageFeatureValue()),
+            'hidden_states': NeuralType(('B', 'T', 'D'), EncodedRepresentation()),
             'transcripts': NeuralType(('B', 'T'), LabelsType()),
             'transcript_length': NeuralType(tuple('B'), LengthsType()),
             'sample_id': NeuralType(tuple('B'), LengthsType(), optional=True),
@@ -586,6 +588,7 @@ class AudioToBPEDataset(_AVTextDataset):
         return {
             'audio_signal': NeuralType(('B', 'T'), AudioSignal()),
             'a_sig_length': NeuralType(tuple('B'), LengthsType()),
+            'video_input_signal': NeuralType(('B', 'T', 'D'), ChannelType()),
             'transcripts': NeuralType(('B', 'T'), LabelsType()),
             'transcript_length': NeuralType(tuple('B'), LengthsType()),
             'sample_id': NeuralType(tuple('B'), LengthsType(), optional=True),

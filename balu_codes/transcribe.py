@@ -1,13 +1,12 @@
 # import nemo.collections.asr as nemo_asr
 import sys
 import os
-sys.path.append(os.path.abspath('/workspace/nemo/NeMo-opensource/nemo/collections'))
-sys.path.append(os.path.abspath('/workspace/nemo/NeMo-opensource/nemo'))
-import asr as nemo_asr
+sys.path.append(os.path.abspath('/workspace/nemo/NeMo-opensource'))
+import nemo.collections.asr as nemo_asr
 
 def load_model(model_name):
     model = nemo_asr.models.ASRModel.from_pretrained(model_name)
     return model
-
-model = load_model("stt_en_conformer_ctc_large")
-model.transcribe(["/disk1/mixed_dataset_000/mixed_audios/train/08zhZZn29jc_496fe_1997_Peters_Township_High_School_Commencement_SLASH_1997_Peters_Township_High_School_Commencement_DOT_mp3_00010.wav"])
+# model = load_model("stt_en_conformer_ctc_large")
+model = load_model("QuartzNet15x5Base-En")
+model.transcribe(["/disk1/it1/mixed_audios/009LTXtP4vE_c053b1_171114BCPC_SLASH_171114-BC-PC_DOT_mp3_00035.wav"])

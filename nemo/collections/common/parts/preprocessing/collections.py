@@ -471,7 +471,7 @@ class ASRAudioText(AudioText):
         )
 
 
-class ASR_AV_AudioText(AudioText):
+class ASR_AV_AudioText(AVText):
     """`AudioText` collector from asr structured json files."""
 
     def __init__(self, manifests_files: Union[str, List[str]], *args, **kwargs):
@@ -496,7 +496,7 @@ class ASR_AV_AudioText(AudioText):
         for item in manifest.item_iter(manifests_files):
             ids.append(item['id'])
             audio_files.append(item['audio_file'])
-            video_featfiles.append(item['video_featfile'])
+            video_featfiles.append(item['feature_file'])
             durations.append(item['duration'])
             texts.append(item['text'])
             offsets.append(item['offset'])
