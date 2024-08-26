@@ -209,15 +209,17 @@ class AVText(_Collection):
 
     AV_OUTPUT_TYPE = collections.namedtuple(
         typename='AVTextEntity',
-        field_names='id audio_file video_featfile duration text_tokens offset text_raw speaker orig_sr lang',
+        field_names='id audio_file video_file video_featfile duration text_tokens snr offset text_raw speaker orig_sr lang',
     )
 
     def __init__(
         self,
         ids: List[int],
         audio_files: List[str],
+        video_files: List[str],
         video_featfiles: List[str],
         durations: List[float],
+        snr_ratios: List[float],
         texts: List[str],
         offsets: List[str],
         speakers: List[Optional[int]],
@@ -236,9 +238,11 @@ class AVText(_Collection):
         Args:
             ids: List of examples positions.
             audio_files: List of audio files.
+            video_files: List of video files.
             video_featfiles: List of video feature files.
             durations: List of float durations.
             texts: List of raw text transcripts.
+            snr_ratios: List of signal-to-noise ratios.
             offsets: List of duration offsets or None.
             speakers: List of optional speakers ids.
             orig_sampling_rates: List of original sampling rates of audio files.
@@ -256,8 +260,8 @@ class AVText(_Collection):
         if index_by_file_id:
             self.mapping = {}
 
-        for id_, audio_file, video_featfile, duration, offset, text, speaker, orig_sr, token_labels, lang in zip(
-            ids, audio_files, video_featfiles, durations, offsets, texts, speakers, orig_sampling_rates, token_labels, langs
+        for id_, audio_file, video_file, video_featfile, duration, offset, text, snr_ratio, speaker, orig_sr, token_labels, lang in zip(
+            ids, audio_files, video_files, video_featfiles, durations, offsets, texts, snr_ratios, speakers, orig_sampling_rates, token_labels, langs
         ):
             # Duration filters.
             if min_duration is not None and duration < min_duration:
@@ -295,8 +299,8 @@ class AVText(_Collection):
 
             total_duration += duration
 
-            data.append(output_type(id_, audio_file, video_featfile, duration,
-                        text_tokens, offset, text, speaker, orig_sr, lang))
+            data.append(output_type(id_, audio_file, video_file, video_featfile, duration,
+                        text_tokens, snr_ratio, offset, text, speaker, orig_sr, lang))
             if index_by_file_id:
                 file_id, _ = os.path.splitext(os.path.basename(audio_file))
                 if file_id not in self.mapping:
@@ -480,11 +484,13 @@ class ASR_AV_AudioText(AVText):
         Args:
             manifests_files: Either single string file or list of such -
                 manifests to yield items from.
-            *args: Args to pass to `AudioText` constructor.
-            **kwargs: Kwargs to pass to `AudioText` constructor.
+            *args: Args to pass to `AVText` constructor.
+            **kwargs: Kwargs to pass to `AVText` constructor.
         """
 
-        ids, audio_files, durations, texts, offsets, video_featfiles = (
+        ids, audio_files, video_files, durations, texts, offsets, video_featfiles, snr_ratios = (
+            [],
+            [],
             [],
             [],
             [],
@@ -493,19 +499,21 @@ class ASR_AV_AudioText(AVText):
             [],
         )
         speakers, orig_srs, token_labels, langs = [], [], [], []
-        for item in manifest.item_iter(manifests_files):
+        for item in manifest.av_item_iter(manifests_files):
             ids.append(item['id'])
             audio_files.append(item['audio_file'])
             video_featfiles.append(item['feature_file'])
             durations.append(item['duration'])
             texts.append(item['text'])
+            video_files.append(item['video_file'])
+            snr_ratios.append(item['snr_ratio'])
             offsets.append(item['offset'])
             speakers.append(item['speaker'])
             orig_srs.append(item['orig_sr'])
             token_labels.append(item['token_labels'])
             langs.append(item['lang'])
         super().__init__(
-            ids, audio_files, video_featfiles, durations, texts, offsets, speakers, orig_srs, token_labels, langs, *args, **kwargs
+            ids, audio_files, video_files, video_featfiles, durations, snr_ratios, texts, offsets, speakers, orig_srs, token_labels, langs, *args, **kwargs
         )
 
 

@@ -24,6 +24,7 @@ from nemo.collections.asr.models.clustering_diarizer import ClusteringDiarizer
 from nemo.collections.asr.models.ctc_bpe_models import EncDecCTCModelBPE
 from nemo.collections.asr.models.ctc_models import EncDecCTCModel
 from nemo.collections.asr.models.av_ctc_models import AV_EncDecCTCModel
+from nemo.collections.asr.models.av_ctc_bpe_models import AV_EncDecCTCModelBPE
 from nemo.collections.asr.models.enhancement_models import (
     EncMaskDecAudioToAudioModel,
     PredictiveAudioToAudioModel,

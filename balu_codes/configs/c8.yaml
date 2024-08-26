@@ -1,0 +1,286 @@
+sample_rate: 16000
+log_prediction: true
+ctc_reduction: mean_batch
+skip_nan_grad: false
+a_model_name: BPE:stt_en_conformer_ctc_large
+labelled_manifest: true
+exp_dir: /tmp/bld56_dataset_v1/tmp/
+wandb:
+  run_name: av_ndec_lman_stok_fullau
+  project: NEMO_TEST
+  create_wandb_logger: true
+  log_model: false
+use_video_modality: true
+use_pretrained_dec: false
+train_ds:
+  manifest_filepath: /tmp/bld56_dataset_v1/it2/annotations/manifest_train_no_label.json
+  video_frame_rate: 5
+  get_vid_feats: true
+  get_zero_vid_feats: false
+  sample_rate: 16000
+  batch_size: 96
+  shuffle: true
+  num_workers: 10
+  pin_memory: true
+  use_start_end_token: false
+  trim_silence: false
+  max_duration: 20.0
+  min_duration: 0.1
+  is_tarred: false
+  tarred_audio_filepaths: null
+  shuffle_n: 2048
+  bucketing_strategy: synced_randomized
+  override_snr_ratio: 0.7
+  bucketing_batch_size:
+  - 34
+  - 30
+  - 26
+  - 22
+  - 18
+  - 16
+  - 12
+  - 8
+validation_ds:
+  manifest_filepath: /tmp/bld56_dataset_v1/it2/annotations/manifest_eval_no_label.json
+  video_frame_rate: 5
+  get_vid_feats: true
+  get_zero_vid_feats: false
+  sample_rate: 16000
+  batch_size: 96
+  shuffle: false
+  num_workers: 10
+  pin_memory: true
+  override_snr_ratio: 0.7
+  use_start_end_token: false
+test_ds:
+  manifest_filepath: /tmp/bld56_dataset_v1/it2/annotations/manifest_eval_no_label.json
+  video_frame_rate: 5
+  get_vid_feats: true
+  get_zero_vid_feats: false
+  sample_rate: 16000
+  batch_size: 96
+  shuffle: false
+  num_workers: 10
+  pin_memory: true
+  override_snr_ratio: 0.7
+  use_start_end_token: false
+tokenizer:
+  dir: /home/bld56/gsoc/nemo/NeMo-opensource/tutorials/asr/tokenizers/av_tokenizer/init_toknizer/
+  type: bpe
+  model_path: /home/bld56/gsoc/nemo/NeMo-opensource/tutorials/asr/tokenizers/av_tokenizer/init_toknizer/tokenizer.model
+  vocab_path: /home/bld56/gsoc/nemo/NeMo-opensource/tutorials/asr/tokenizers/av_tokenizer/init_toknizer/vocab.txt
+  spe_tokenizer_vocab: /home/bld56/gsoc/nemo/NeMo-opensource/tutorials/asr/tokenizers/av_tokenizer/init_toknizer/tokenizer.vocab
+preprocessor:
+  _target_: nemo.collections.asr.modules.AudioToMelSpectrogramPreprocessor
+  sample_rate: 16000
+  normalize: per_feature
+  window_size: 0.025
+  window_stride: 0.01
+  window: hann
+  features: 80
+  n_fft: 512
+  log: true
+  frame_splicing: 1
+  dither: 1.0e-05
+  pad_to: 0
+  pad_value: 0.0
+spec_augment:
+  _target_: nemo.collections.asr.modules.SpectrogramAugmentation
+  freq_masks: 2
+  time_masks: 10
+  freq_width: 27
+  time_width: 0.05
+av_encoder:
+  d_model: 768
+  nhead: 8
+  num_layers: 4
+  dropout: 0.1
+v_model:
+  feat_dim: 768
+encoder:
+  _target_: nemo.collections.asr.modules.ConformerEncoder
+  feat_in: 80
+  feat_out: -1
+  n_layers: 18
+  d_model: 512
+  subsampling: striding
+  subsampling_factor: 4
+  subsampling_conv_channels: 512
+  ff_expansion_factor: 4
+  self_attention_model: rel_pos
+  n_heads: 8
+  att_context_size:
+  - -1
+  - -1
+  xscaling: true
+  untie_biases: true
+  pos_emb_max_len: 5000
+  conv_kernel_size: 31
+  conv_norm_type: batch_norm
+  dropout: 0.1
+  dropout_emb: 0.0
+  dropout_att: 0.1
+decoder:
+  _target_: nemo.collections.asr.modules.ConvASRDecoder
+  feat_in: 768
+  num_classes: 128
+  vocabulary:
+  - <unk>
+  - ▁
+  - s
+  - t
+  - e
+  - d
+  - o
+  - ▁the
+  - a
+  - i
+  - ▁a
+  - u
+  - 'y'
+  - m
+  - l
+  - 'n'
+  - p
+  - re
+  - c
+  - h
+  - r
+  - ▁s
+  - g
+  - ▁to
+  - er
+  - ing
+  - f
+  - ▁and
+  - an
+  - ▁i
+  - k
+  - ▁that
+  - ''''
+  - ▁of
+  - ▁in
+  - w
+  - ▁p
+  - ed
+  - or
+  - al
+  - ar
+  - ▁f
+  - en
+  - in
+  - b
+  - ▁you
+  - ▁w
+  - ▁b
+  - le
+  - ll
+  - es
+  - ▁it
+  - ve
+  - ur
+  - ▁we
+  - ▁re
+  - ▁be
+  - ly
+  - ▁is
+  - ▁he
+  - ▁o
+  - ▁c
+  - it
+  - ▁n
+  - ▁on
+  - un
+  - ▁t
+  - 'on'
+  - se
+  - th
+  - ce
+  - ▁do
+  - ic
+  - ▁for
+  - ▁th
+  - ion
+  - ch
+  - ▁was
+  - ri
+  - ent
+  - ▁g
+  - ver
+  - ▁co
+  - li
+  - ▁ha
+  - ▁ma
+  - la
+  - ro
+  - v
+  - us
+  - ▁ca
+  - ▁di
+  - ▁this
+  - ra
+  - ▁st
+  - ▁e
+  - ▁not
+  - ▁so
+  - ▁de
+  - ▁have
+  - ter
+  - ir
+  - ▁go
+  - ation
+  - ▁with
+  - ate
+  - ▁me
+  - ▁mo
+  - ment
+  - ▁con
+  - ▁but
+  - vi
+  - ▁pro
+  - ▁ho
+  - j
+  - ▁com
+  - ight
+  - ▁know
+  - ▁what
+  - ect
+  - ▁ex
+  - ▁some
+  - ▁would
+  - ▁like
+  - x
+  - ▁his
+  - q
+  - z
+optim:
+  name: adamw
+  lr: 0.2
+  betas:
+  - 0.9
+  - 0.98
+  weight_decay: 0.001
+  sched:
+    name: NoamAnnealing
+    d_model: 512
+    warmup_steps: 2000
+    warmup_ratio: null
+    min_lr: 1.0e-07
+compute_eval_loss: false
+adapters:
+  linear_adapter:
+    keep: false
+    name: AV_v1
+    dim: 64
+    activation: swish
+    norm_position: pre
+    dropout: 0.1
+  multi_head_attention_adapter:
+    keep: false
+  rel_position_multi_head_attention_adapter:
+    keep: false
+variational_noise:
+  start_step: 0
+  std: 0.0
+target: nemo.collections.asr.models.ctc_bpe_models.AV_EncDecCTCModelBPE
+nemo_version: 1.9.0rc0

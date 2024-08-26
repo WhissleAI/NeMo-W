@@ -47,6 +47,9 @@ from nemo.utils.get_rank import is_global_rank_zero
 
 import numpy as np
 
+# FOR NOISE LOADING
+from pydub import AudioSegment
+
 __all__ = [
     'AVToCharDataset',
     'AVToBPEDataset',
@@ -56,7 +59,7 @@ VALID_FILE_FORMATS = ';'.join(
     ['wav', 'mp3', 'flac', 'opus'] + [fmt.lower() for fmt in valid_sf_formats.keys()])
 
 
-def _speech_collate_fn(batch, pad_id):
+def _speech_collate_fn(batch, pad_id, get_vid_feats):
     """collate batch of audio sig, audio len, video sig, tokens, tokens len
     Args:
         batch (Optional[FloatTensor], Optional[LongTensor], Optional[LongTensor],
@@ -65,13 +68,22 @@ def _speech_collate_fn(batch, pad_id):
                assumes the signals are 1d torch tensors (i.e. mono audio).
     """
     packed_batch = list(zip(*batch))
-    if len(packed_batch) == 6:
-        _, audio_lengths, _, _, tokens_lengths, sample_ids = packed_batch
-    elif len(packed_batch) == 5:
-        sample_ids = None
-        _, audio_lengths, _, _, tokens_lengths = packed_batch
+    if get_vid_feats:
+        if len(packed_batch) == 6:
+            _, audio_lengths, _, _, tokens_lengths, sample_ids = packed_batch
+        elif len(packed_batch) == 5:
+            sample_ids = None
+            _, audio_lengths, _, _, tokens_lengths = packed_batch
+        else:
+            raise ValueError(f"Expects 5 or 6 tensors in the batch!")
     else:
-        raise ValueError("Expects 5 or 6 tensors in the batch!")
+        if len(packed_batch) == 4:
+            sample_ids = None
+            _, audio_lengths, _, tokens_lengths = packed_batch
+        elif len(packed_batch) == 5:
+            _, audio_lengths, _, tokens_lengths, sample_ids = packed_batch
+        else:
+            raise ValueError(f"Expects 4 or 5 tensors in the batch!")
     max_audio_len = 0
     has_audio = audio_lengths[0] is not None
     if has_audio:
@@ -80,17 +92,22 @@ def _speech_collate_fn(batch, pad_id):
 
     audio_signal, tokens, video_feat_signal = [], [], []
     for b in batch:
-        if len(b) == 6:
+        if len(b) == 6 and get_vid_feats:
             sig, sig_len, video_feat, tokens_i, tokens_i_len, _ = b
-        else:
+        elif len(b) == 5 and get_vid_feats:
             sig, sig_len, video_feat, tokens_i, tokens_i_len = b
+        elif len(b) == 5 and not get_vid_feats:
+            sig, sig_len, tokens_i, tokens_i_len, _ = b
+        elif len(b) == 4 and not get_vid_feats:
+            sig, sig_len, tokens_i, tokens_i_len = b
         if has_audio:
             sig_len = sig_len.item()
             if sig_len < max_audio_len:
                 pad = (0, max_audio_len - sig_len)
                 sig = torch.nn.functional.pad(sig, pad)
             audio_signal.append(sig)
-        video_feat_signal.append(video_feat)
+        if get_vid_feats:
+            video_feat_signal.append(video_feat)
         tokens_i_len = tokens_i_len.item()
         if tokens_i_len < max_tokens_len:
             pad = (0, max_tokens_len - tokens_i_len)
@@ -102,14 +119,20 @@ def _speech_collate_fn(batch, pad_id):
         audio_lengths = torch.stack(audio_lengths)
     else:
         audio_signal, audio_lengths = None, None
-    video_feat_signal = torch.stack(video_feat_signal)
+    if get_vid_feats:
+        video_feat_signal = torch.stack(video_feat_signal)
     tokens = torch.stack(tokens)
     tokens_lengths = torch.stack(tokens_lengths)
-    if sample_ids is None:
-        return audio_signal, audio_lengths, video_feat_signal, tokens, tokens_lengths
-    else:
+    base_output = [audio_signal, audio_lengths, tokens, tokens_lengths]
+
+    if get_vid_feats:
+        base_output.insert(2, video_feat_signal)
+
+    if sample_ids is not None:
         sample_ids = torch.tensor(sample_ids, dtype=torch.int32)
-        return audio_signal, audio_lengths, video_feat_signal, tokens, tokens_lengths, sample_ids
+        base_output.append(sample_ids)
+
+    return tuple(base_output)
 
 class ASR_AV_ManifestProcessor:
     """
@@ -346,7 +369,7 @@ class _AVTextDataset(Dataset):
         return {
             'audio_signal': [NeuralType(('B', 'T'), AudioSignal())],
             'a_sig_length': [NeuralType(tuple('B'), LengthsType())],
-            'video_input_signal': [NeuralType(('B', 'T', 'D'), ChannelType())],
+            'video_input_signal': [NeuralType(('B', 'T', 'D'), ChannelType(), optional=True)],
             'transcripts': [NeuralType(('B', 'T'), LabelsType())],
             'transcript_length': [NeuralType(tuple('B'), LengthsType())],
             'sample_id': [NeuralType(tuple('B'), LengthsType(), optional=True)],
@@ -369,6 +392,9 @@ class _AVTextDataset(Dataset):
         return_sample_id: bool = False,
         channel_selector: Optional[ChannelSelectorType] = None,
         video_frame_rate: int = 5,
+        get_vid_feats: bool = True,
+        get_zero_vid_feats: bool = False,
+        override_snr_ratio: Optional[float] = None,
     ):
         if type(manifest_filepath) == str:
             manifest_filepath = manifest_filepath.split(",")
@@ -394,6 +420,9 @@ class _AVTextDataset(Dataset):
         self.return_sample_id = return_sample_id
         self.channel_selector = channel_selector
         self.video_frame_rate = video_frame_rate
+        self.get_vid_feats = get_vid_feats
+        self.get_zero_vid_feats = get_zero_vid_feats
+        self.override_snr_ratio = override_snr_ratio
 
     def get_manifest_sample(self, sample_id):
         return self.manifest_processor.collection[sample_id]
@@ -404,6 +433,39 @@ class _AVTextDataset(Dataset):
         else:
             return self._process_sample(index)
 
+    def calculate_rms(self, audio):
+        """Calculate the RMS (root mean square) level of an audio signal."""
+        return torch.sqrt(torch.mean(audio ** 2))
+
+    def adjust_volume(self, audio, target_rms):
+        """Adjust the audio's volume to a target RMS level."""
+        current_rms = self.calculate_rms(audio)
+        return audio * (target_rms / (current_rms + 1e-9))  # Avoid division by zero
+
+    def _mix_audios(self, noisy_audio_feats, clean_audio_feats, snr, target_sr=16000):
+        if self.override_snr_ratio is not None:
+            snr = self.override_snr_ratio
+        rms1 = self.calculate_rms(clean_audio_feats)
+        rms2 = self.calculate_rms(noisy_audio_feats)
+        mean_rms = (rms1 + rms2) / 2
+        
+        noisy_audio_feats = self.adjust_volume(noisy_audio_feats, mean_rms)
+        clean_audio_feats = self.adjust_volume(clean_audio_feats, mean_rms)
+        
+        assert len(clean_audio_feats) >= 10*target_sr, f"Audio length is too short: {len(clean_audio_feats)}"
+        
+        if len(noisy_audio_feats) < len(clean_audio_feats):
+            noisy_audio_feats = torch.nn.functional.pad(noisy_audio_feats, (0, len(clean_audio_feats) - len(noisy_audio_feats)))
+
+        min_len = min(10*target_sr, len(clean_audio_feats))
+        noisy_audio_feats = noisy_audio_feats[:min_len]
+        clean_audio_feats = clean_audio_feats[:min_len]
+        
+        mixed_audio = snr * clean_audio_feats + (1 - snr) * noisy_audio_feats
+        
+        return mixed_audio      
+
+    
     def _process_sample(self, index):
         sample = self.manifest_processor.collection[index]
         offset = sample.offset
@@ -411,7 +473,7 @@ class _AVTextDataset(Dataset):
         if offset is None:
             offset = 0
 
-        features = self.featurizer.process(
+        clean_audio_features = self.featurizer.process(
             sample.audio_file,
             offset=offset,
             duration=sample.duration,
@@ -419,35 +481,56 @@ class _AVTextDataset(Dataset):
             orig_sr=sample.orig_sr,
             channel_selector=self.channel_selector,
         )
-        f, fl = features, torch.tensor(features.shape[0]).long()
+        if self.override_snr_ratio != 0.0: 
+            audio = AudioSegment.from_file(sample.video_file, format="mp4")
+            samples_pydub = np.array(audio.get_array_of_samples(), dtype=np.float32)
+            noise_features = torch.tensor(samples_pydub, dtype=torch.float32)
+            noise_features = noise_features / (2**(8 * audio.sample_width) / 2)
+            mixed_features = self._mix_audios(noise_features, clean_audio_features, snr = sample.snr)
+        else:
+            mixed_features = clean_audio_features
+        f, fl = mixed_features, torch.tensor(mixed_features.shape[0]).long()
 
-        # check if file exists
-        assert os.path.exists(
-            sample.video_featfile), f"Video feature file {sample.video_featfile} does not exist"
-        vf = np.load(sample.video_featfile)
-        # uniformly sample self.video_frame_rate frames from video at shape 0.
-        # TODO: @Balu, how would you do this, if you one frame rate then you should make many dirs with different frame rates.
-        assert vf.shape[0] == self.video_frame_rate*sample.duration, f"Video feature file {sample.video_featfile} has {vf.shape[0]} frame_feats, expected {self.video_frame_rate}"
-
+        # TODO: @Balu, saving audio temporarily
+        # save_audio_path = f"/tmp/bld56_dataset_v1/audioset/temp_sample_check/{index}.wav"
+        # import torchaudio
+        # torchaudio.save(save_audio_path, f.unsqueeze(0), 16000)
+        
+        if self.get_vid_feats:
+            if not self.get_zero_vid_feats:
+                # check if file exists
+                assert os.path.exists(
+                    sample.video_featfile), f"Video feature file {sample.video_featfile} does not exist"
+                vf = np.load(sample.video_featfile)
+                # uniformly sample self.video_frame_rate frames from video at shape 0.
+                assert vf.shape[0] == self.video_frame_rate*sample.duration, f"Video feature file {sample.video_featfile} has {vf.shape[0]} frame_feats, expected {self.video_frame_rate}"
+                vf = torch.from_numpy(vf)
+                # make it torch float
+                vf = vf.float()
+            else:
+                vf = torch.zeros(
+                    self.video_frame_rate*sample.duration, 768).float()
+        
         t, tl = self.manifest_processor.process_text_by_sample(sample=sample)
 
-        vf = torch.from_numpy(vf)
-        # make it torch float
-        vf = vf.float()
+        output = [f, fl, torch.tensor(t).long(), torch.tensor(tl).long()]
+
+        if self.get_vid_feats:
+            output.insert(2, vf)
+
         if self.return_sample_id:
-            output = f, fl, vf, torch.tensor(
-                t).long(), torch.tensor(tl).long(), index
-        else:
-            output = f, fl, vf, torch.tensor(
-                t).long(), torch.tensor(tl).long()
+            output.append(index)
+
+        output = tuple(output)
 
         return output
 
     def __len__(self):
+        # return 100
         return len(self.manifest_processor.collection)
 
     def _collate_fn(self, batch):
-        return _speech_collate_fn(batch, pad_id=self.manifest_processor.pad_id)
+        return _speech_collate_fn(batch, pad_id=self.manifest_processor.pad_id, get_vid_feats=self.get_vid_feats)
 
 
 class AVToCharDataset(_AVTextDataset):
@@ -491,7 +574,7 @@ class AVToCharDataset(_AVTextDataset):
         return {
             'audio_signal': NeuralType(('B', 'T'), AudioSignal()),
             'a_sig_length': NeuralType(tuple('B'), LengthsType()),
-            'hidden_states': NeuralType(('B', 'T', 'D'), EncodedRepresentation()),
+            'hidden_states': NeuralType(('B', 'T', 'D'), ImageFeatureValue(), optional=True),
             'transcripts': NeuralType(('B', 'T'), LabelsType()),
             'transcript_length': NeuralType(tuple('B'), LengthsType()),
             'sample_id': NeuralType(tuple('B'), LengthsType(), optional=True),
@@ -518,6 +601,9 @@ class AVToCharDataset(_AVTextDataset):
         return_sample_id: bool = False,
         channel_selector: Optional[ChannelSelectorType] = None,
         video_frame_rate: int = 3,
+        get_vid_feats: bool = True,
+        get_zero_vid_feats: bool = False,
+        override_snr_ratio: Optional[float] = None,
     ):
         self.labels = labels
 
@@ -541,10 +627,13 @@ class AVToCharDataset(_AVTextDataset):
             return_sample_id=return_sample_id,
             channel_selector=channel_selector,
             video_frame_rate=video_frame_rate,
+            get_vid_feats=get_vid_feats,
+            get_zero_vid_feats=get_zero_vid_feats,
+            override_snr_ratio=override_snr_ratio,
         )
 
 
-class AudioToBPEDataset(_AVTextDataset):
+class AVToBPEDataset(_AVTextDataset):
     """
     Dataset that loads tensors via a json file containing paths to audio
     files, transcripts, and durations (in seconds). Each new line is a
@@ -579,20 +668,31 @@ class AudioToBPEDataset(_AVTextDataset):
             tokens to beginning and ending of speech respectively.
         return_sample_id (bool): whether to return the sample_id as a part of each sample
         channel_selector (int | Iterable[int] | str): select a single channel or a subset of channels from multi-channel audio. If set to `'average'`, it performs averaging across channels. Disabled if set to `None`. Defaults to `None`. Uses zero-based indexing.
+        video_frame_rate (int): Frame rate of video, used to calculate duration of video
     """
 
     @property
     def output_types(self) -> Optional[Dict[str, NeuralType]]:
         """Returns definitions of module output ports.
                """
-        return {
-            'audio_signal': NeuralType(('B', 'T'), AudioSignal()),
-            'a_sig_length': NeuralType(tuple('B'), LengthsType()),
-            'video_input_signal': NeuralType(('B', 'T', 'D'), ChannelType()),
-            'transcripts': NeuralType(('B', 'T'), LabelsType()),
-            'transcript_length': NeuralType(tuple('B'), LengthsType()),
-            'sample_id': NeuralType(tuple('B'), LengthsType(), optional=True),
-        }
+        if self.get_vid_feats:
+            return {
+                'audio_signal': NeuralType(('B', 'T'), AudioSignal()),
+                'a_sig_length': NeuralType(tuple('B'), LengthsType()),
+                'hidden_states': NeuralType(('B', 'T', 'D'), ImageFeatureValue(), optional=True),
+                'transcripts': NeuralType(('B', 'T'), LabelsType()),
+                'transcript_length': NeuralType(tuple('B'), LengthsType()),
+                'sample_id': NeuralType(tuple('B'), LengthsType(), optional=True),
+            }
+        else:
+            return {
+                'audio_signal': NeuralType(('B', 'T'), AudioSignal()),
+                'a_sig_length': NeuralType(tuple('B'), LengthsType()),
+                'transcripts': NeuralType(('B', 'T'), LabelsType()),
+                'transcript_length': NeuralType(tuple('B'), LengthsType()),
+                'sample_id': NeuralType(tuple('B'), LengthsType(), optional=True),
+            }
+
 
     def __init__(
         self,
@@ -608,6 +708,10 @@ class AudioToBPEDataset(_AVTextDataset):
         use_start_end_token: bool = True,
         return_sample_id: bool = False,
         channel_selector: Optional[ChannelSelectorType] = None,
+        video_frame_rate: int = 3,
+        get_vid_feats: bool = True,
+        get_zero_vid_feats: bool = False,
+        override_snr_ratio: Optional[float] = None,
     ):
         if use_start_end_token and hasattr(tokenizer, "bos_id") and tokenizer.bos_id > 0:
             bos_id = tokenizer.bos_id
@@ -658,4 +762,8 @@ class AudioToBPEDataset(_AVTextDataset):
             trim=trim,
             return_sample_id=return_sample_id,
             channel_selector=channel_selector,
+            video_frame_rate=video_frame_rate,
+            get_vid_feats=get_vid_feats,
+            get_zero_vid_feats=get_zero_vid_feats,
+            override_snr_ratio=override_snr_ratio,
         )

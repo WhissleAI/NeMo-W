@@ -22,8 +22,10 @@ from omegaconf import DictConfig, ListConfig, OmegaConf, open_dict
 from nemo.collections.asr.data import audio_to_text_dataset
 from nemo.collections.asr.data.audio_to_text import _AudioTextDataset
 from nemo.collections.asr.losses.ctc import CTCLoss
-from nemo.collections.asr.metrics.wer import WER
+from nemo.collections.asr.metrics.av_wer import AV_WER
 from nemo.collections.asr.models.ctc_models import EncDecCTCModel
+from nemo.collections.asr.models.av_ctc_models import AV_EncDecCTCModel
+from nemo.collections.asr.models.ctc_bpe_models import EncDecCTCModelBPE
 from nemo.collections.asr.parts.mixins import ASRBPEMixin
 from nemo.collections.asr.parts.submodules.ctc_decoding import CTCBPEDecoding, CTCBPEDecodingConfig
 from nemo.collections.asr.parts.utils.asr_batching import get_semi_sorted_batch_sampler
@@ -31,10 +33,10 @@ from nemo.collections.common.data.lhotse import get_lhotse_dataloader_from_confi
 from nemo.core.classes.common import PretrainedModelInfo
 from nemo.utils import logging, model_utils
 
-__all__ = ['EncDecCTCModelBPE']
+__all__ = ['AV_EncDecCTCModelBPE']
 
 
-class EncDecCTCModelBPE(EncDecCTCModel, ASRBPEMixin):
+class AV_EncDecCTCModelBPE(AV_EncDecCTCModel, ASRBPEMixin):
     """Encoder decoder CTC-based models with Byte Pair Encoding."""
 
     def __init__(self, cfg: DictConfig, trainer=None):
@@ -50,7 +52,7 @@ class EncDecCTCModelBPE(EncDecCTCModel, ASRBPEMixin):
 
         # Initialize a dummy vocabulary
         vocabulary = self.tokenizer.tokenizer.get_vocab()
-
+        self.labelled_manifest = cfg.labelled_manifest
         # Set the new vocabulary
         with open_dict(cfg):
             # sidestepping the potential overlapping tokens issue in aggregate tokenizers
@@ -72,6 +74,7 @@ class EncDecCTCModelBPE(EncDecCTCModel, ASRBPEMixin):
 
         super().__init__(cfg=cfg, trainer=trainer)
 
+
         # Setup decoding objects
         decoding_cfg = self.cfg.get('decoding', None)
 
@@ -84,23 +87,17 @@ class EncDecCTCModelBPE(EncDecCTCModel, ASRBPEMixin):
         self.decoding = CTCBPEDecoding(self.cfg.decoding, tokenizer=self.tokenizer)
 
         # Setup metric with decoding strategy
-        self.wer = WER(
+        self.wer = AV_WER(
             decoding=self.decoding,
             use_cer=self._cfg.get('use_cer', False),
             dist_sync_on_step=True,
             log_prediction=self._cfg.get("log_prediction", False),
+            labelled_manifest=self.labelled_manifest,
         )
 
     def _setup_dataloader_from_config(self, config: Optional[Dict]):
-        # if config.get("use_lhotse"):
-        #     return get_lhotse_dataloader_from_config(
-        #         config,
-        #         global_rank=self.global_rank,
-        #         world_size=self.world_size,
-        #         dataset=LhotseSpeechToTextBpeDataset(tokenizer=self.tokenizer),
-        #     )
 
-        dataset = audio_to_text_dataset.get_audio_to_text_bpe_dataset_from_config(
+        dataset = audio_to_text_dataset.get_av_to_text_bpe_dataset_from_config(
             config=config,
             local_rank=self.local_rank,
             global_rank=self.global_rank,
@@ -112,9 +109,6 @@ class EncDecCTCModelBPE(EncDecCTCModel, ASRBPEMixin):
         if dataset is None:
             return None
 
-        if isinstance(dataset, AudioToBPEDALIDataset):
-            # DALI Dataset implements dataloader interface
-            return dataset
 
         shuffle = config['shuffle']
         if isinstance(dataset, torch.utils.data.IterableDataset):
@@ -288,11 +282,12 @@ class EncDecCTCModelBPE(EncDecCTCModel, ASRBPEMixin):
 
         self.decoding = CTCBPEDecoding(decoding_cfg=decoding_cfg, tokenizer=self.tokenizer)
 
-        self.wer = WER(
+        self.wer = AV_WER(
             decoding=self.decoding,
             use_cer=self._cfg.get('use_cer', False),
             log_prediction=self._cfg.get("log_prediction", False),
             dist_sync_on_step=True,
+            labelled_manifest=self.labelled_manifest,
         )
 
         # Update config
@@ -324,11 +319,12 @@ class EncDecCTCModelBPE(EncDecCTCModel, ASRBPEMixin):
 
         self.decoding = CTCBPEDecoding(decoding_cfg=decoding_cfg, tokenizer=self.tokenizer,)
 
-        self.wer = WER(
+        self.wer = AV_WER(
             decoding=self.decoding,
             use_cer=self.wer.use_cer,
             log_prediction=self.wer.log_prediction,
             dist_sync_on_step=True,
+            labelled_manifest=self.labelled_manifest,
         )
 
         self.decoder.temperature = decoding_cfg.get('temperature', 1.0)
@@ -348,309 +344,5 @@ class EncDecCTCModelBPE(EncDecCTCModel, ASRBPEMixin):
             List of available pre-trained models.
         """
         results = []
-
-        model = PretrainedModelInfo(
-            pretrained_model_name="stt_en_citrinet_256",
-            description="For details about this model, please visit https://ngc.nvidia.com/catalog/models/nvidia:nemo:stt_en_citrinet_256",
-            location="https://api.ngc.nvidia.com/v2/models/nvidia/nemo/stt_en_citrinet_256/versions/1.0.0rc1/files/stt_en_citrinet_256.nemo",
-        )
-        results.append(model)
-
-        model = PretrainedModelInfo(
-            pretrained_model_name="stt_en_citrinet_512",
-            description="For details about this model, please visit https://ngc.nvidia.com/catalog/models/nvidia:nemo:stt_en_citrinet_512",
-            location="https://api.ngc.nvidia.com/v2/models/nvidia/nemo/stt_en_citrinet_512/versions/1.0.0rc1/files/stt_en_citrinet_512.nemo",
-        )
-        results.append(model)
-
-        model = PretrainedModelInfo(
-            pretrained_model_name="stt_en_citrinet_1024",
-            description="For details about this model, please visit https://ngc.nvidia.com/catalog/models/nvidia:nemo:stt_en_citrinet_1024",
-            location="https://api.ngc.nvidia.com/v2/models/nvidia/nemo/stt_en_citrinet_1024/versions/1.0.0rc1/files/stt_en_citrinet_1024.nemo",
-        )
-        results.append(model)
-
-        model = PretrainedModelInfo(
-            pretrained_model_name="stt_en_citrinet_256_gamma_0_25",
-            description="For details about this model, please visit https://ngc.nvidia.com/catalog/models/nvidia:nemo:stt_en_citrinet_256_gamma_0_25",
-            location="https://api.ngc.nvidia.com/v2/models/nvidia/nemo/stt_en_citrinet_256_gamma_0_25/versions/1.0.0/files/stt_en_citrinet_256_gamma_0_25.nemo",
-        )
-        results.append(model)
-
-        model = PretrainedModelInfo(
-            pretrained_model_name="stt_en_citrinet_512_gamma_0_25",
-            description="For details about this model, please visit https://ngc.nvidia.com/catalog/models/nvidia:nemo:stt_en_citrinet_512_gamma_0_25",
-            location="https://api.ngc.nvidia.com/v2/models/nvidia/nemo/stt_en_citrinet_512_gamma_0_25/versions/1.0.0/files/stt_en_citrinet_512_gamma_0_25.nemo",
-        )
-        results.append(model)
-
-        model = PretrainedModelInfo(
-            pretrained_model_name="stt_en_citrinet_1024_gamma_0_25",
-            description="For details about this model, please visit https://ngc.nvidia.com/catalog/models/nvidia:nemo:stt_en_citrinet_1024_gamma_0_25",
-            location="https://api.ngc.nvidia.com/v2/models/nvidia/nemo/stt_en_citrinet_1024_gamma_0_25/versions/1.0.0/files/stt_en_citrinet_1024_gamma_0_25.nemo",
-        )
-
-        results.append(model)
-
-        model = PretrainedModelInfo(
-            pretrained_model_name="stt_es_citrinet_512",
-            description="For details about this model, please visit https://ngc.nvidia.com/catalog/models/nvidia:nemo:stt_es_citrinet_512",
-            location="https://api.ngc.nvidia.com/v2/models/nvidia/nemo/stt_es_citrinet_512/versions/1.0.0/files/stt_es_citrinet_512.nemo",
-        )
-
-        results.append(model)
-
-        model = PretrainedModelInfo(
-            pretrained_model_name="stt_de_citrinet_1024",
-            description="For details about this model, please visit https://ngc.nvidia.com/catalog/models/nvidia:nemo:stt_de_citrinet_1024",
-            location="https://api.ngc.nvidia.com/v2/models/nvidia/nemo/stt_de_citrinet_1024/versions/1.5.0/files/stt_de_citrinet_1024.nemo",
-        )
-        results.append(model)
-
-        model = PretrainedModelInfo(
-            pretrained_model_name="stt_fr_citrinet_1024_gamma_0_25",
-            description="For details about this model, please visit https://catalog.ngc.nvidia.com/orgs/nvidia/teams/nemo/models/stt_fr_citrinet_1024_gamma_0_25",
-            location="https://api.ngc.nvidia.com/v2/models/nvidia/nemo/stt_fr_citrinet_1024_gamma_0_25/versions/1.5/files/stt_fr_citrinet_1024_gamma_0_25.nemo",
-        )
-        results.append(model)
-
-        model = PretrainedModelInfo(
-            pretrained_model_name="stt_fr_no_hyphen_citrinet_1024_gamma_0_25",
-            description="For details about this model, please visit https://catalog.ngc.nvidia.com/orgs/nvidia/teams/nemo/models/stt_fr_citrinet_1024_gamma_0_25",
-            location="https://api.ngc.nvidia.com/v2/models/nvidia/nemo/stt_fr_citrinet_1024_gamma_0_25/versions/1.5/files/stt_fr_no_hyphen_citrinet_1024_gamma_0_25.nemo",
-        )
-        results.append(model)
-
-        model = PretrainedModelInfo(
-            pretrained_model_name="stt_es_citrinet_1024_gamma_0_25",
-            description="For details about this model, please visit https://ngc.nvidia.com/catalog/models/nvidia:nemo:stt_es_citrinet_1024_gamma_0_25",
-            location="https://api.ngc.nvidia.com/v2/models/nvidia/nemo/stt_es_citrinet_1024_gamma_0_25/versions/1.8.0/files/stt_es_citrinet_1024_gamma_0_25.nemo",
-        )
-
-        results.append(model)
-
-        model = PretrainedModelInfo(
-            pretrained_model_name="stt_en_conformer_ctc_small",
-            description="For details about this model, please visit https://ngc.nvidia.com/catalog/models/nvidia:nemo:stt_en_conformer_ctc_small",
-            location="https://api.ngc.nvidia.com/v2/models/nvidia/nemo/stt_en_conformer_ctc_small/versions/1.6.0/files/stt_en_conformer_ctc_small.nemo",
-        )
-        results.append(model)
-
-        model = PretrainedModelInfo(
-            pretrained_model_name="stt_en_conformer_ctc_medium",
-            description="For details about this model, please visit https://ngc.nvidia.com/catalog/models/nvidia:nemo:stt_en_conformer_ctc_medium",
-            location="https://api.ngc.nvidia.com/v2/models/nvidia/nemo/stt_en_conformer_ctc_medium/versions/1.6.0/files/stt_en_conformer_ctc_medium.nemo",
-        )
-        results.append(model)
-
-        model = PretrainedModelInfo(
-            pretrained_model_name="stt_en_conformer_ctc_large",
-            description="For details about this model, please visit https://ngc.nvidia.com/catalog/models/nvidia:nemo:stt_en_conformer_ctc_large",
-            location="https://api.ngc.nvidia.com/v2/models/nvidia/nemo/stt_en_conformer_ctc_large/versions/1.10.0/files/stt_en_conformer_ctc_large.nemo",
-        )
-        results.append(model)
-
-        model = PretrainedModelInfo(
-            pretrained_model_name="stt_en_conformer_ctc_xlarge",
-            description="For details about this model, please visit https://ngc.nvidia.com/catalog/models/nvidia:nemo:stt_en_conformer_ctc_xlarge",
-            location="https://api.ngc.nvidia.com/v2/models/nvidia/nemo/stt_en_conformer_ctc_xlarge/versions/1.10.0/files/stt_en_conformer_ctc_xlarge.nemo",
-        )
-        results.append(model)
-
-        model = PretrainedModelInfo(
-            pretrained_model_name="stt_en_squeezeformer_ctc_xsmall_ls",
-            description="For details about this model, please visit https://catalog.ngc.nvidia.com/orgs/nvidia/teams/nemo/models/stt_en_squeezeformer_ctc_xsmall_ls",
-            location="https://api.ngc.nvidia.com/v2/models/nvidia/nemo/stt_en_squeezeformer_ctc_xsmall_ls/versions/1.13.0/files/stt_en_squeezeformer_ctc_xsmall_ls.nemo",
-        )
-        results.append(model)
-
-        model = PretrainedModelInfo(
-            pretrained_model_name="stt_en_squeezeformer_ctc_small_ls",
-            description="For details about this model, please visit https://catalog.ngc.nvidia.com/orgs/nvidia/teams/nemo/models/stt_en_squeezeformer_ctc_small_ls",
-            location="https://api.ngc.nvidia.com/v2/models/nvidia/nemo/stt_en_squeezeformer_ctc_small_ls/versions/1.13.0/files/stt_en_squeezeformer_ctc_small_ls.nemo",
-        )
-        results.append(model)
-
-        model = PretrainedModelInfo(
-            pretrained_model_name="stt_en_squeezeformer_ctc_small_medium_ls",
-            description="For details about this model, please visit https://catalog.ngc.nvidia.com/orgs/nvidia/teams/nemo/models/stt_en_squeezeformer_ctc_small_medium_ls",
-            location="https://api.ngc.nvidia.com/v2/models/nvidia/nemo/stt_en_squeezeformer_ctc_small_medium_ls/versions/1.13.0/files/stt_en_squeezeformer_ctc_small_medium_ls.nemo",
-        )
-        results.append(model)
-
-        model = PretrainedModelInfo(
-            pretrained_model_name="stt_en_squeezeformer_ctc_medium_ls",
-            description="For details about this model, please visit https://catalog.ngc.nvidia.com/orgs/nvidia/teams/nemo/models/stt_en_squeezeformer_ctc_medium_ls",
-            location="https://api.ngc.nvidia.com/v2/models/nvidia/nemo/stt_en_squeezeformer_ctc_medium_ls/versions/1.13.0/files/stt_en_squeezeformer_ctc_medium_ls.nemo",
-        )
-        results.append(model)
-
-        model = PretrainedModelInfo(
-            pretrained_model_name="stt_en_squeezeformer_ctc_medium_large_ls",
-            description="For details about this model, please visit https://catalog.ngc.nvidia.com/orgs/nvidia/teams/nemo/models/stt_en_squeezeformer_ctc_medium_large_ls",
-            location="https://api.ngc.nvidia.com/v2/models/nvidia/nemo/stt_en_squeezeformer_ctc_medium_large_ls/versions/1.13.0/files/stt_en_squeezeformer_ctc_medium_large_ls.nemo",
-        )
-        results.append(model)
-
-        model = PretrainedModelInfo(
-            pretrained_model_name="stt_en_squeezeformer_ctc_large_ls",
-            description="For details about this model, please visit https://catalog.ngc.nvidia.com/orgs/nvidia/teams/nemo/models/stt_en_squeezeformer_ctc_large_ls",
-            location="https://api.ngc.nvidia.com/v2/models/nvidia/nemo/stt_en_squeezeformer_ctc_large_ls/versions/1.13.0/files/stt_en_squeezeformer_ctc_large_ls.nemo",
-        )
-        results.append(model)
-
-        model = PretrainedModelInfo(
-            pretrained_model_name="stt_en_conformer_ctc_small_ls",
-            description="For details about this model, please visit https://ngc.nvidia.com/catalog/models/nvidia:nemo:stt_en_conformer_ctc_small_ls",
-            location="https://api.ngc.nvidia.com/v2/models/nvidia/nemo/stt_en_conformer_ctc_small_ls/versions/1.0.0/files/stt_en_conformer_ctc_small_ls.nemo",
-        )
-        results.append(model)
-
-        model = PretrainedModelInfo(
-            pretrained_model_name="stt_en_conformer_ctc_medium_ls",
-            description="For details about this model, please visit https://ngc.nvidia.com/catalog/models/nvidia:nemo:stt_en_conformer_ctc_medium_ls",
-            location="https://api.ngc.nvidia.com/v2/models/nvidia/nemo/stt_en_conformer_ctc_medium_ls/versions/1.0.0/files/stt_en_conformer_ctc_medium_ls.nemo",
-        )
-        results.append(model)
-
-        model = PretrainedModelInfo(
-            pretrained_model_name="stt_en_conformer_ctc_large_ls",
-            description="For details about this model, please visit https://ngc.nvidia.com/catalog/models/nvidia:nemo:stt_en_conformer_ctc_large_ls",
-            location="https://api.ngc.nvidia.com/v2/models/nvidia/nemo/stt_en_conformer_ctc_large_ls/versions/1.0.0/files/stt_en_conformer_ctc_large_ls.nemo",
-        )
-        results.append(model)
-
-        model = PretrainedModelInfo(
-            pretrained_model_name="stt_fr_conformer_ctc_large",
-            description="For details about this model, please visit https://catalog.ngc.nvidia.com/orgs/nvidia/teams/nemo/models/stt_fr_conformer_ctc_large",
-            location="https://api.ngc.nvidia.com/v2/models/nvidia/nemo/stt_fr_conformer_ctc_large/versions/1.5.1/files/stt_fr_conformer_ctc_large.nemo",
-        )
-        results.append(model)
-
-        model = PretrainedModelInfo(
-            pretrained_model_name="stt_fr_no_hyphen_conformer_ctc_large",
-            description="For details about this model, please visit https://catalog.ngc.nvidia.com/orgs/nvidia/teams/nemo/models/stt_fr_conformer_ctc_large",
-            location="https://api.ngc.nvidia.com/v2/models/nvidia/nemo/stt_fr_conformer_ctc_large/versions/1.5.1/files/stt_fr_no_hyphen_conformer_ctc_large.nemo",
-        )
-        results.append(model)
-
-        model = PretrainedModelInfo(
-            pretrained_model_name="stt_de_conformer_ctc_large",
-            description="For details about this model, please visit https://ngc.nvidia.com/catalog/models/nvidia:nemo:stt_de_conformer_ctc_large",
-            location="https://api.ngc.nvidia.com/v2/models/nvidia/nemo/stt_de_conformer_ctc_large/versions/1.5.0/files/stt_de_conformer_ctc_large.nemo",
-        )
-        results.append(model)
-
-        model = PretrainedModelInfo(
-            pretrained_model_name="stt_es_conformer_ctc_large",
-            description="For details about this model, please visit https://ngc.nvidia.com/catalog/models/nvidia:nemo:stt_es_conformer_ctc_large",
-            location="https://api.ngc.nvidia.com/v2/models/nvidia/nemo/stt_es_conformer_ctc_large/versions/1.8.0/files/stt_es_conformer_ctc_large.nemo",
-        )
-        results.append(model)
-
-        model = PretrainedModelInfo(
-            pretrained_model_name="stt_hi_conformer_ctc_medium",
-            description="For details about this model, please visit https://ngc.nvidia.com/catalog/models/nvidia:nemo:stt_hi_conformer_ctc_medium",
-            location="https://api.ngc.nvidia.com/v2/models/nvidia/nemo/stt_hi_conformer_ctc_medium/versions/1.6.0/files/stt_hi_conformer_ctc_medium.nemo",
-        )
-        results.append(model)
-
-        model = PretrainedModelInfo(
-            pretrained_model_name="stt_mr_conformer_ctc_medium",
-            description="For details about this model, please visit https://ngc.nvidia.com/catalog/models/nvidia:nemo:stt_mr_conformer_ctc_medium",
-            location="https://api.ngc.nvidia.com/v2/models/nvidia/nemo/stt_mr_conformer_ctc_medium/versions/1.6.0/files/stt_mr_conformer_ctc_medium.nemo",
-        )
-        results.append(model)
-
-        model = PretrainedModelInfo(
-            pretrained_model_name="stt_enes_conformer_ctc_large",
-            description="For details about this model, please visit https://ngc.nvidia.com/catalog/models/nvidia:nemo:stt_enes_conformer_ctc_large",
-            location="https://api.ngc.nvidia.com/v2/models/nvidia/nemo/stt_enes_conformer_ctc_large/versions/1.0.0/files/stt_enes_conformer_ctc_large.nemo",
-        )
-        results.append(model)
-
-        model = PretrainedModelInfo(
-            pretrained_model_name="stt_ca_conformer_ctc_large",
-            description="For details about this model, please visit https://ngc.nvidia.com/catalog/models/nvidia:nemo:stt_ca_conformer_ctc_large",
-            location="https://api.ngc.nvidia.com/v2/models/nvidia/nemo/stt_ca_conformer_ctc_large/versions/1.11.0/files/stt_ca_conformer_ctc_large.nemo",
-        )
-        results.append(model)
-
-        model = PretrainedModelInfo(
-            pretrained_model_name="stt_rw_conformer_ctc_large",
-            description="For details about this model, please visit https://ngc.nvidia.com/catalog/models/nvidia:nemo:stt_rw_conformer_ctc_large",
-            location="https://api.ngc.nvidia.com/v2/models/nvidia/nemo/stt_rw_conformer_ctc_large/versions/1.11.0/files/stt_rw_conformer_ctc_large.nemo",
-        )
-        results.append(model)
-
-        model = PretrainedModelInfo(
-            pretrained_model_name="stt_enes_conformer_ctc_large_codesw",
-            description="For details about this model, please visit https://ngc.nvidia.com/catalog/models/nvidia:nemo:stt_enes_conformer_ctc_large_codesw",
-            location="https://api.ngc.nvidia.com/v2/models/nvidia/nemo/stt_enes_conformer_ctc_large_codesw/versions/1.0.0/files/stt_enes_conformer_ctc_large_codesw.nemo",
-        )
-        results.append(model)
-
-        model = PretrainedModelInfo(
-            pretrained_model_name="stt_be_conformer_ctc_large",
-            description="For details about this model, please visit https://ngc.nvidia.com/catalog/models/nvidia:nemo:stt_be_conformer_ctc_large",
-            location="https://api.ngc.nvidia.com/v2/models/nvidia/nemo/stt_be_conformer_ctc_large/versions/1.12.0/files/stt_be_conformer_ctc_large.nemo",
-        )
-        results.append(model)
-
-        model = PretrainedModelInfo(
-            pretrained_model_name="stt_hr_conformer_ctc_large",
-            description="For details about this model, please visit https://ngc.nvidia.com/catalog/models/nvidia:nemo:stt_hr_conformer_ctc_large",
-            location="https://api.ngc.nvidia.com/v2/models/nvidia/nemo/stt_hr_conformer_ctc_large/versions/1.11.0/files/stt_hr_conformer_ctc_large.nemo",
-        )
-        results.append(model)
-
-        model = PretrainedModelInfo(
-            pretrained_model_name="stt_it_conformer_ctc_large",
-            description="For details about this model, please visit https://ngc.nvidia.com/catalog/models/nvidia:nemo:stt_it_conformer_ctc_large",
-            location="https://api.ngc.nvidia.com/v2/models/nvidia/nemo/stt_it_conformer_ctc_large/versions/1.13.0/files/stt_it_conformer_ctc_large.nemo",
-        )
-        results.append(model)
-
-        model = PretrainedModelInfo(
-            pretrained_model_name="stt_ru_conformer_ctc_large",
-            description="For details about this model, please visit https://ngc.nvidia.com/catalog/models/nvidia:nemo:stt_ru_conformer_ctc_large",
-            location="https://api.ngc.nvidia.com/v2/models/nvidia/nemo/stt_ru_conformer_ctc_large/versions/1.13.0/files/stt_ru_conformer_ctc_large.nemo",
-        )
-        results.append(model)
-
-        model = PretrainedModelInfo(
-            pretrained_model_name="stt_eo_conformer_ctc_large",
-            description="For details about this model, please visit https://ngc.nvidia.com/catalog/models/nvidia:nemo:stt_eo_conformer_ctc_large",
-            location="https://api.ngc.nvidia.com/v2/models/nvidia/nemo/stt_eo_conformer_ctc_large/versions/1.14.0/files/stt_eo_conformer_ctc_large.nemo",
-        )
-        results.append(model)
-
-        model = PretrainedModelInfo(
-            pretrained_model_name="stt_en_fastconformer_ctc_large",
-            description="For details about this model, please visit https://ngc.nvidia.com/catalog/models/nvidia:nemo:stt_en_fastconformer_ctc_large",
-            location="https://api.ngc.nvidia.com/v2/models/nvidia/nemo/stt_en_fastconformer_ctc_large/versions/1.0.0/files/stt_en_fastconformer_ctc_large.nemo",
-        )
-        results.append(model)
-
-        model = PretrainedModelInfo(
-            pretrained_model_name="stt_en_fastconformer_ctc_large_ls",
-            description="For details about this model, please visit https://ngc.nvidia.com/catalog/models/nvidia:nemo:stt_en_fastconformer_ctc_large_ls",
-            location="https://api.ngc.nvidia.com/v2/models/nvidia/nemo/stt_en_fastconformer_ctc_large_ls/versions/1.0.0/files/stt_en_fastconformer_ctc_large_ls.nemo",
-        )
-        results.append(model)
-
-        model = PretrainedModelInfo(
-            pretrained_model_name="stt_en_fastconformer_ctc_xlarge",
-            description="For details about this model, please visit https://ngc.nvidia.com/catalog/models/nvidia:nemo:stt_en_fastconformer_ctc_xlarge",
-            location="https://api.ngc.nvidia.com/v2/models/nvidia/nemo/stt_en_fastconformer_ctc_xlarge/versions/1.20.0/files/stt_en_fastconformer_ctc_xlarge.nemo",
-        )
-        results.append(model)
-
-        model = PretrainedModelInfo(
-            pretrained_model_name="stt_en_fastconformer_ctc_xxlarge",
-            description="For details about this model, please visit https://ngc.nvidia.com/catalog/models/nvidia:nemo:stt_en_fastconformer_ctc_xxlarge",
-            location="https://api.ngc.nvidia.com/v2/models/nvidia/nemo/stt_en_fastconformer_ctc_xxlarge/versions/1.20.1/files/stt_en_fastconformer_ctc_xxlarge.nemo",
-        )
-        results.append(model)
 
         return results
