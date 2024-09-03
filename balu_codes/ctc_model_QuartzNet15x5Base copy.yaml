@@ -18,7 +18,7 @@ spec_augment:
     rect_masks: 5
     rect_time: 120
 
-a_model_name: QuartzNet15x5Base-En
+a_model_name: QuartzNet15x5Base-En # CHANGE
 sample_rate: 16000
 labels: 
   - ' '
@@ -50,20 +50,20 @@ labels:
   - z
   - ''''
 train_ds:
-  manifest_filepath: /disk1/it1/annotations/manifest_train.json
-  video_frame_rate: 5
-  # - - /data2/nemo_asr/nemo_asr_set_3.0/bucket1/tarred_audio_manifest.json #TBD
+  manifest_filepath: /disk1/it1/annotations/manifest_train.json # CHANGE
+  video_frame_rate: 5 # CHANGE
+  # - - /data2/nemo_asr/nemo_asr_set_3.0/bucket1/tarred_audio_manifest.json #TBD # CHANGE
   sample_rate: 16000
-  batch_size: 1
+  batch_size: 1 # CHANGE
   shuffle: true
-  num_workers: 0
+  num_workers: 0 # CHANGE
   pin_memory: true
   use_start_end_token: false
   trim_silence: false
-  max_duration: 20.0
+  max_duration: 20.0 # CHANGE
   min_duration: 0.1
   is_tarred: false
-  tarred_audio_filepaths: null
+  tarred_audio_filepaths: null # CHANGE
   shuffle_n: 2048
   bucketing_strategy: synced_randomized
   bucketing_batch_size:
@@ -77,9 +77,9 @@ train_ds:
   - 8
 
 validation_ds:
-  manifest_filepath: /disk1/it1/annotations/manifest_train.json
-  video_frame_rate: 5
-  # - /manifests/librispeech/librivox-dev-other.json #TBD
+  manifest_filepath: /disk1/it1/annotations/manifest_train.json # CHANGE
+  video_frame_rate: 5 # CHANGE
+  # - /manifests/librispeech/librivox-dev-other.json #TBD # CHANGE
   sample_rate: 16000
   batch_size: 1
   shuffle: false
@@ -96,13 +96,13 @@ test_ds:
   pin_memory: true
   use_start_end_token: false
 
-av_encoder:
+av_encoder: # CHANGE
   d_model: 512
   nhead: 4
   num_layers: 2
   dropout: 0.1
 
-v_model:
+v_model: # CHANGE
   feat_dim: 512
 
 decoder:
@@ -146,4 +146,4 @@ optim:
   - 0.8
   - 0.5
   weight_decay: 0.001
-target: nemo.collections.asr.models.av_ctc_bpe_models.AV_EncDecCTCModelBPE
+target: nemo.collections.asr.models.av_ctc_bpe_models.AV_EncDecCTCModel

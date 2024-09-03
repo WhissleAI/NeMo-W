@@ -59,14 +59,14 @@ source activate /home/bld56/.miniconda3/envs/nemo
 # av_ndec_lman_ntok
 # CUDA_VISIBLE_DEVICES=0 /home/bld56/.miniconda3/envs/nemo/bin/python train_av_asr.py --config 5 --snr 0.5 --resume_pretrained True &
 
-sleep 20
+# sleep 40
 # av_ndec_uman_ntok
 # CUDA_VISIBLE_DEVICES=1 /home/bld56/.miniconda3/envs/nemo/bin/python train_av_asr.py --config 9 --snr 0.5 --resume_pretrained True &
 
 # au_ndec_lman_ntok
 CUDA_VISIBLE_DEVICES=0 /home/bld56/.miniconda3/envs/nemo/bin/python train_av_asr.py --config 10 --snr 0.5 --resume_pretrained True &
 
-sleep 20
+sleep 40
 # au_ndec_uman_ntok
 CUDA_VISIBLE_DEVICES=1 /home/bld56/.miniconda3/envs/nemo/bin/python train_av_asr.py --config 11 --snr 0.5 --resume_pretrained True &
 

@@ -209,7 +209,7 @@ class AVText(_Collection):
 
     AV_OUTPUT_TYPE = collections.namedtuple(
         typename='AVTextEntity',
-        field_names='id audio_file video_file video_featfile duration text_tokens snr offset text_raw speaker orig_sr lang',
+        field_names='id audio_file video_file video_featfile duration text_tokens snr offset text_raw speaker orig_sr lang label',
     )
 
     def __init__(
@@ -226,6 +226,7 @@ class AVText(_Collection):
         orig_sampling_rates: List[Optional[int]],
         token_labels: List[Optional[int]],
         langs: List[Optional[str]],
+        labels: List[Optional[str]],
         parser: parsers.CharParser,
         min_duration: Optional[float] = None,
         max_duration: Optional[float] = None,
@@ -260,8 +261,8 @@ class AVText(_Collection):
         if index_by_file_id:
             self.mapping = {}
 
-        for id_, audio_file, video_file, video_featfile, duration, offset, text, snr_ratio, speaker, orig_sr, token_labels, lang in zip(
-            ids, audio_files, video_files, video_featfiles, durations, offsets, texts, snr_ratios, speakers, orig_sampling_rates, token_labels, langs
+        for id_, audio_file, video_file, video_featfile, duration, offset, text, snr_ratio, speaker, orig_sr, token_labels, lang, label in zip(
+            ids, audio_files, video_files, video_featfiles, durations, offsets, texts, snr_ratios, speakers, orig_sampling_rates, token_labels, langs, labels
         ):
             # Duration filters.
             if min_duration is not None and duration < min_duration:
@@ -296,11 +297,16 @@ class AVText(_Collection):
                     duration_filtered += duration
                     num_filtered += 1
                     continue
-
+            
+            if label is not None: # <N1>
+                # replace <,>,N and then convert to int
+                label = int(label.replace('<', '').replace('>', '').replace('N', ''))
+                label = label - 1 # 0-indexed
+            
             total_duration += duration
 
             data.append(output_type(id_, audio_file, video_file, video_featfile, duration,
-                        text_tokens, snr_ratio, offset, text, speaker, orig_sr, lang))
+                        text_tokens, snr_ratio, offset, text, speaker, orig_sr, lang, label))
             if index_by_file_id:
                 file_id, _ = os.path.splitext(os.path.basename(audio_file))
                 if file_id not in self.mapping:
@@ -488,7 +494,8 @@ class ASR_AV_AudioText(AVText):
             **kwargs: Kwargs to pass to `AVText` constructor.
         """
 
-        ids, audio_files, video_files, durations, texts, offsets, video_featfiles, snr_ratios = (
+        ids, audio_files, video_files, durations, texts, offsets, video_featfiles, snr_ratios, labels = (
+            [],
             [],
             [],
             [],
@@ -512,8 +519,9 @@ class ASR_AV_AudioText(AVText):
             orig_srs.append(item['orig_sr'])
             token_labels.append(item['token_labels'])
             langs.append(item['lang'])
+            labels.append(item['label'])
         super().__init__(
-            ids, audio_files, video_files, video_featfiles, durations, snr_ratios, texts, offsets, speakers, orig_srs, token_labels, langs, *args, **kwargs
+            ids, audio_files, video_files, video_featfiles, durations, snr_ratios, texts, offsets, speakers, orig_srs, token_labels, langs, labels, *args, **kwargs
         )
 
 

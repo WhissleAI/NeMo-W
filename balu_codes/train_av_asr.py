@@ -19,6 +19,7 @@ import argparse
 def load_and_configure_model(config_file_path):
     conf = OmegaConf.load(config_file_path)
     overrides = OmegaConf.from_cli()
+    print(overrides)
     updated_conf = OmegaConf.merge(conf, overrides)
     OmegaConf.set_struct(updated_conf, True)
     model = nemo_asr.models.AV_EncDecCTCModelBPE(updated_conf)
@@ -96,22 +97,41 @@ def setup_exp_manager(trainer, model):
         
     return logdir
 
+def selective_load(model, checkpoint_path):
+    checkpoint = torch.load(checkpoint_path)
+    state_dict = checkpoint['state_dict']
+
+    # Filter out unnecessary keys
+    model_state_dict = model.state_dict()
+    filtered_state_dict = {k: v for k, v in state_dict.items() if k in model_state_dict and v.size() == model_state_dict[k].size()}
+
+    # Update the existing model state dict with the filtered state dict from the checkpoint
+    model_state_dict.update(filtered_state_dict)
+
+    # Load the updated state dict back into the model
+    model.load_state_dict(model_state_dict)
+    # print(f"Loaded keys from checkpoint: {filtered_state_dict.keys()}")
+    print(model)
+    return model
+
+
 # Main function to execute the workflow
 def main(config_file_path, args):
     model, conf = load_and_configure_model(config_file_path)
     if args.resume_pretrained:
         ckpt_path = f"/tmp/bld56_dataset_v1/saved_models/pre_av_ndec_uman_ntok--val_u_wer=0.0809-epoch=11.ckpt"
-        checkpoint = torch.load(ckpt_path)
-        model.load_state_dict(checkpoint['state_dict'])
-        print(model)
+        # checkpoint = torch.load(ckpt_path)
+        # print(checkpoint['state_dict'].keys())
+        # model.load_state_dict(checkpoint['state_dict'])
+        model = selective_load(model, ckpt_path)
         model.cfg.wandb.run_name += 'pre+'
     manage_model_adapters(model, conf)
     
     trainer = setup_trainer()
     model.set_trainer(trainer)
     logdir = setup_exp_manager(trainer, model)
-    trainer.fit(model)
-    # trainer.validate(model)
+    # trainer.fit(model)
+    trainer.validate(model)
 
 if __name__ == "__main__":
     # add config number args

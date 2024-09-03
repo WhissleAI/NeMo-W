@@ -240,7 +240,6 @@ def av_item_iter(
                     errors[str(manifest_file)].append(line)
                     continue
                 item['id'] = k
-
                 yield item
 
     if len(errors) > 0:
@@ -330,6 +329,11 @@ def __av_parse_item(line: str, manifest_file: str) -> Dict[str, Any]:
     else:
         item['snr'] = None
         
+    if 'label' in item:
+        item['label'] = item.pop('label')
+    else:
+        item['label'] = None
+        
     item = dict(
         audio_file=item.get('audio_file', None),
         video_file=item.get('video_file', None),
@@ -343,6 +347,7 @@ def __av_parse_item(line: str, manifest_file: str) -> Dict[str, Any]:
         token_labels=item.get('token_labels', None),
         lang=item.get('lang', None),
         snr_ratio=item.get('snr', None),
+        label=item.get('label', None),
     )
     return item
 

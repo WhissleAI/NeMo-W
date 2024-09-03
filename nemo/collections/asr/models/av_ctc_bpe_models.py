@@ -270,6 +270,7 @@ class AV_EncDecCTCModelBPE(AV_EncDecCTCModel, ASRBPEMixin):
             zero_infinity=True,
             reduction=self._cfg.get("ctc_reduction", "mean_batch"),
         )
+        self.ce_loss = torch.nn.CrossEntropyLoss()
 
         if decoding_cfg is None:
             # Assume same decoding config as before

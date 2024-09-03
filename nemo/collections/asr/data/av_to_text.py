@@ -69,19 +69,19 @@ def _speech_collate_fn(batch, pad_id, get_vid_feats):
     """
     packed_batch = list(zip(*batch))
     if get_vid_feats:
-        if len(packed_batch) == 6:
-            _, audio_lengths, _, _, tokens_lengths, sample_ids = packed_batch
-        elif len(packed_batch) == 5:
+        if len(packed_batch) == 7:
+            _, audio_lengths, _, _, tokens_lengths, labels, sample_ids = packed_batch
+        elif len(packed_batch) == 6:
             sample_ids = None
-            _, audio_lengths, _, _, tokens_lengths = packed_batch
+            _, audio_lengths, _, _, tokens_lengths, labels = packed_batch
         else:
             raise ValueError(f"Expects 5 or 6 tensors in the batch!")
     else:
-        if len(packed_batch) == 4:
+        if len(packed_batch) == 5:
             sample_ids = None
-            _, audio_lengths, _, tokens_lengths = packed_batch
-        elif len(packed_batch) == 5:
-            _, audio_lengths, _, tokens_lengths, sample_ids = packed_batch
+            _, audio_lengths, _, tokens_lengths, labels = packed_batch
+        elif len(packed_batch) == 4:
+            _, audio_lengths, _, tokens_lengths, sample_ids, labels = packed_batch
         else:
             raise ValueError(f"Expects 4 or 5 tensors in the batch!")
     max_audio_len = 0
@@ -90,16 +90,16 @@ def _speech_collate_fn(batch, pad_id, get_vid_feats):
         max_audio_len = max(audio_lengths).item()
     max_tokens_len = max(tokens_lengths).item()
 
-    audio_signal, tokens, video_feat_signal = [], [], []
+    audio_signal, tokens, video_feat_signal, labels = [], [], [], []
     for b in batch:
-        if len(b) == 6 and get_vid_feats:
-            sig, sig_len, video_feat, tokens_i, tokens_i_len, _ = b
-        elif len(b) == 5 and get_vid_feats:
-            sig, sig_len, video_feat, tokens_i, tokens_i_len = b
+        if len(b) == 7 and get_vid_feats:
+            sig, sig_len, video_feat, tokens_i, tokens_i_len, label, _ = b
+        elif len(b) == 6 and get_vid_feats:
+            sig, sig_len, video_feat, tokens_i, tokens_i_len, label = b
+        elif len(b) == 6 and not get_vid_feats:
+            sig, sig_len, tokens_i, tokens_i_len, label, _ = b
         elif len(b) == 5 and not get_vid_feats:
-            sig, sig_len, tokens_i, tokens_i_len, _ = b
-        elif len(b) == 4 and not get_vid_feats:
-            sig, sig_len, tokens_i, tokens_i_len = b
+            sig, sig_len, tokens_i, tokens_i_len, label = b
         if has_audio:
             sig_len = sig_len.item()
             if sig_len < max_audio_len:
@@ -113,6 +113,7 @@ def _speech_collate_fn(batch, pad_id, get_vid_feats):
             pad = (0, max_tokens_len - tokens_i_len)
             tokens_i = torch.nn.functional.pad(tokens_i, pad, value=pad_id)
         tokens.append(tokens_i)
+        labels.append(label)
 
     if has_audio:
         audio_signal = torch.stack(audio_signal)
@@ -123,7 +124,8 @@ def _speech_collate_fn(batch, pad_id, get_vid_feats):
         video_feat_signal = torch.stack(video_feat_signal)
     tokens = torch.stack(tokens)
     tokens_lengths = torch.stack(tokens_lengths)
-    base_output = [audio_signal, audio_lengths, tokens, tokens_lengths]
+    labels = torch.stack(labels)
+    base_output = [audio_signal, audio_lengths, tokens, tokens_lengths, labels]
 
     if get_vid_feats:
         base_output.insert(2, video_feat_signal)
@@ -492,7 +494,8 @@ class _AVTextDataset(Dataset):
         f, fl = mixed_features, torch.tensor(mixed_features.shape[0]).long()
 
         # TODO: @Balu, saving audio temporarily
-        # save_audio_path = f"/tmp/bld56_dataset_v1/audioset/temp_sample_check/{index}.wav"
+        # os.makedirs(f"/tmp/bld56_dataset_v1/audioset/temp_sample_check/snr_{self.override_snr_ratio}", exist_ok=True)
+        # save_audio_path = f"/tmp/bld56_dataset_v1/audioset/temp_sample_check/snr_{self.override_snr_ratio}/{sample.video_file.split('/')[-1].split('.')[0]}_{sample.audio_file.split('/')[-1].split('.')[0]}.wav"
         # import torchaudio
         # torchaudio.save(save_audio_path, f.unsqueeze(0), 16000)
         
@@ -513,7 +516,7 @@ class _AVTextDataset(Dataset):
         
         t, tl = self.manifest_processor.process_text_by_sample(sample=sample)
 
-        output = [f, fl, torch.tensor(t).long(), torch.tensor(tl).long()]
+        output = [f, fl, torch.tensor(t).long(), torch.tensor(tl).long(), torch.tensor(sample.label).long()]
 
         if self.get_vid_feats:
             output.insert(2, vf)
@@ -526,6 +529,7 @@ class _AVTextDataset(Dataset):
         return output
 
     def __len__(self):
+        # return 5
         # return 100
         return len(self.manifest_processor.collection)
 

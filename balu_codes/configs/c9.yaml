@@ -12,6 +12,9 @@ wandb:
   log_model: false
 use_video_modality: true
 use_pretrained_dec: false
+label_pred_head:
+  keep: false
+  num_classes: 44
 train_ds:
   manifest_filepath: /tmp/bld56_dataset_v1/it2/annotations/manifest_train_no_label.json
   video_frame_rate: 5

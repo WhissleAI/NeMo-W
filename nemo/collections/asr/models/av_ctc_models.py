@@ -109,7 +109,10 @@ class AV_EncDecCTCModel(ASRModel, ExportableEncDecModel, ASRModuleMixin, InterCT
             self.v_linear = torch.nn.Linear(in_features = self.cfg.v_model.feat_dim, out_features = self.cfg.av_encoder.d_model)
             self.av_enocder_layer = torch.nn.TransformerEncoderLayer(d_model = self.cfg.av_encoder.d_model, nhead = self.cfg.av_encoder.nhead, dropout = self.cfg.av_encoder.dropout, batch_first=True)
             self.av_encoder = torch.nn.TransformerEncoder(self.av_enocder_layer, num_layers = self.cfg.av_encoder.num_layers)
-        
+            if cfg.label_pred_head.keep:
+                self.cls_token = torch.nn.Parameter(torch.randn(1, 1, self.cfg.av_encoder.d_model))
+                self.label_predictor = torch.nn.Linear(self.cfg.av_encoder.d_model, self.cfg.label_pred_head.num_classes)
+            self.ce_loss = torch.nn.CrossEntropyLoss()
             # Modality embeddings
             self.a_modal_embs = torch.nn.Embedding(1, self.cfg.av_encoder.d_model)
             self.v_modal_embs = torch.nn.Embedding(1, self.cfg.av_encoder.d_model)
@@ -243,6 +246,7 @@ class AV_EncDecCTCModel(ASRModel, ExportableEncDecModel, ASRModuleMixin, InterCT
                 zero_infinity=True,
                 reduction=self._cfg.get("ctc_reduction", "mean_batch"),
             )
+            self.ce_loss = torch.nn.CrossEntropyLoss()
 
             if decoding_cfg is None:
                 # Assume same decoding config as before
@@ -482,6 +486,7 @@ class AV_EncDecCTCModel(ASRModel, ExportableEncDecModel, ASRModuleMixin, InterCT
     def output_types(self) -> Optional[Dict[str, NeuralType]]:
         return {
             "outputs": NeuralType(('B', 'T', 'D'), LogprobsType()),
+            "label_log_probs": NeuralType(('B', 'C'), LogprobsType(), optional=True),
             "encoded_lengths": NeuralType(tuple('B'), LengthsType()),
             "greedy_predictions": NeuralType(('B', 'T'), LabelsType()),
         }
@@ -556,28 +561,42 @@ class AV_EncDecCTCModel(ASRModel, ExportableEncDecModel, ASRModuleMixin, InterCT
             
             # Concat and pass them through the transformer encoder
             av_encoded = torch.cat((a_encoded, v_encoded), dim=1)
+            if self.cfg.label_pred_head.keep:
+                cls_token = self.cls_token.expand(encoded.size(0), -1, -1)  # Expanding to batch size
+                av_encoded = torch.cat((cls_token, av_encoded), dim=1)  # Concatenating classifier token
             av_encoded = self.av_encoder(av_encoded)
             
-            # remove the v_encoded tokens
-            av_encoded = av_encoded[:, :T, :]
+            if self.cfg.label_pred_head.keep:
+                # remove the v_encoded tokens
+                av_encoded = av_encoded[:, :T, :]
             
             # B,T,C -> B,C,T
             av_encoded = av_encoded.permute(0, 2, 1)
             
-            # remove 
+            if self.cfg.label_pred_head.keep:
+                # Predicting labels using the classifier token's output
+                cls_output = av_encoded[:, :, 0]  # First token after encoding is the classifier token
+                label_log_probs = self.label_predictor(cls_output)
+            else:
+                label_log_probs = None
+            
             log_probs = self.decoder(encoder_output=av_encoded)
             greedy_predictions = log_probs.argmax(dim=-1, keepdim=False)
         elif (not self.cfg.use_video_modality) and (not self.cfg.use_pretrained_dec):
             log_probs = self.decoder(encoder_output=encoded)
             greedy_predictions = log_probs.argmax(dim=-1, keepdim=False)
+            label_log_probs = None
         elif (not self.cfg.use_video_modality) and self.cfg.use_pretrained_dec:
             log_probs = self.a_model.decoder(encoder_output=encoded)
             greedy_predictions = log_probs.argmax(dim=-1, keepdim=False)
+            label_log_probs = None
         elif self.cfg.use_video_modality and self.cfg.use_pretrained_dec:
             raise ValueError("Pretrained decoder is not supported for video modality")
         
+    
         return (
             log_probs,
+            label_log_probs,
             encoded_len,
             greedy_predictions,
         )
@@ -591,13 +610,13 @@ class AV_EncDecCTCModel(ASRModel, ExportableEncDecModel, ASRModuleMixin, InterCT
         if self.is_interctc_enabled():
             AccessMixin.set_access_enabled(access_enabled=True, guid=self.model_guid)
 
-        signal, signal_len, video_input_signal, transcript, transcript_len = batch
+        signal, signal_len, video_input_signal, transcript, transcript_len, label = batch
         # if isinstance(batch, DALIOutputs) and batch.has_processed_signal:
         #     log_probs, encoded_len, predictions = self.forward(
         #         processed_signal=signal, processed_signal_length=signal_len
         #     )
         # else:
-        log_probs, encoded_len, predictions = self.forward(audio_input_signal=signal, audio_input_signal_length=signal_len, video_input_signal=video_input_signal)
+        log_probs, label_log_probs, encoded_len, predictions = self.forward(audio_input_signal=signal, audio_input_signal_length=signal_len, video_input_signal=video_input_signal)
 
         if hasattr(self, '_trainer') and self._trainer is not None:
             log_every_n_steps = self._trainer.log_every_n_steps
@@ -607,9 +626,14 @@ class AV_EncDecCTCModel(ASRModel, ExportableEncDecModel, ASRModuleMixin, InterCT
         loss_value = self.loss(
             log_probs=log_probs, targets=transcript, input_lengths=encoded_len, target_lengths=transcript_len
         )
-
-        # Add auxiliary losses, if registered
-        loss_value = self.add_auxiliary_losses(loss_value)
+        if self.cfg.label_pred_head.keep:
+            label_loss_value = self.ce_loss(label_log_probs, label)
+            # Add auxiliary losses, if registered
+            loss_value = self.add_auxiliary_losses(loss_value+label_loss_value)
+        else:
+            label_loss_value = 0.0
+            loss_value = self.add_auxiliary_losses(loss_value)
+            
         # only computing WER when requested in the logs (same as done for final-layer WER below)
         loss_value, tensorboard_logs = self.add_interctc_losses(
             loss_value, transcript, transcript_len, compute_wer=((batch_nb + 1) % log_every_n_steps == 0)
@@ -619,6 +643,9 @@ class AV_EncDecCTCModel(ASRModel, ExportableEncDecModel, ASRModuleMixin, InterCT
         if AccessMixin.is_access_enabled(self.model_guid):
             AccessMixin.reset_registry(self)
 
+        if self.cfg.label_pred_head.keep:
+            tensorboard_logs.update({'train_label_loss': label_loss_value})
+        
         tensorboard_logs.update(
             {
                 'train_loss': loss_value,
@@ -651,16 +678,16 @@ class AV_EncDecCTCModel(ASRModel, ExportableEncDecModel, ASRModuleMixin, InterCT
                 tensorboard_logs.update({'train_acc': acc})
                 self.log('train_acc', acc, on_step=True, on_epoch=False)
 
-        return {'loss': loss_value, 'log': tensorboard_logs}
+        return {'loss': loss_value+label_loss_value, 'log': tensorboard_logs}
 
     def predict_step(self, batch, batch_idx, dataloader_idx=0):
-        signal, signal_len, video_input_signal, transcript, transcript_len, sample_id = batch
+        signal, signal_len, video_input_signal, transcript, transcript_len, label, sample_id = batch
         # if isinstance(batch, DALIOutputs) and batch.has_processed_signal:
         #     log_probs, encoded_len, predictions = self.forward(
         #         processed_signal=signal, processed_signal_length=signal_len
         #     )
         # else:
-        log_probs, encoded_len, predictions = self.forward(audio_input_signal=signal, audio_input_signal_length=signal_len, video_input_signal=video_input_signal)
+        log_probs, label_loss_value, encoded_len, predictions = self.forward(audio_input_signal=signal, audio_input_signal_length=signal_len, video_input_signal=video_input_signal)
 
         transcribed_texts, _ = self.wer.decoding.ctc_decoder_predictions_tensor(
             decoder_outputs=log_probs, decoder_lengths=encoded_len, return_hypotheses=False,
@@ -673,17 +700,21 @@ class AV_EncDecCTCModel(ASRModel, ExportableEncDecModel, ASRModuleMixin, InterCT
         if self.is_interctc_enabled():
             AccessMixin.set_access_enabled(access_enabled=True, guid=self.model_guid)
 
-        signal, signal_len, video_input_signal, transcript, transcript_len = batch
+        signal, signal_len, video_input_signal, transcript, transcript_len, label = batch
         # if isinstance(batch, DALIOutputs) and batch.has_processed_signal:
         #     log_probs, encoded_len, predictions = self.forward(
         #         processed_signal=signal, processed_signal_length=signal_len
         #     )
         # else:
-        log_probs, encoded_len, predictions = self.forward(audio_input_signal=signal, audio_input_signal_length=signal_len, video_input_signal=video_input_signal)
+        log_probs, label_log_probs, encoded_len, predictions = self.forward(audio_input_signal=signal, audio_input_signal_length=signal_len, video_input_signal=video_input_signal)
 
         loss_value = self.loss(
             log_probs=log_probs, targets=transcript, input_lengths=encoded_len, target_lengths=transcript_len
         )
+        if self.cfg.label_pred_head.keep:
+            label_loss_value = self.ce_loss(label_log_probs, label)
+        else:
+            label_loss_value = 0.0
         loss_value, metrics = self.add_interctc_losses(
             loss_value, transcript, transcript_len, compute_wer=True, log_wer_num_denom=True, log_prefix="val_",
         )
@@ -694,7 +725,8 @@ class AV_EncDecCTCModel(ASRModel, ExportableEncDecModel, ASRModuleMixin, InterCT
         # wer, wer_num, wer_denom = self.wer.compute()
         labelled_wer, unlabelled_wer, acc, scores_unlabelled, words_unlabelled = self.wer.compute()
         self.wer.reset()
-        metrics.update({'val_loss': loss_value, 'val_labelled_wer': labelled_wer, 'val_unlabelled_wer': unlabelled_wer, 'val_acc': acc, 'val_wer_num': scores_unlabelled, 'val_wer_denom': words_unlabelled})
+        metrics.update({'val_loss': loss_value, 'val_label_loss': label_loss_value,
+                        'val_labelled_wer': labelled_wer, 'val_unlabelled_wer': unlabelled_wer, 'val_acc': acc, 'val_wer_num': scores_unlabelled, 'val_wer_denom': words_unlabelled})
         
         # self.log('global_step', torch.tensor(self.trainer.global_step, dtype=torch.float32))
         if labelled_wer is not None:
@@ -704,6 +736,8 @@ class AV_EncDecCTCModel(ASRModel, ExportableEncDecModel, ASRModuleMixin, InterCT
         if acc is not None:
             self.log('val_acc', acc, on_epoch=True, sync_dist=True)
         self.log('val_loss', loss_value, sync_dist=True)
+        if self.cfg.label_pred_head.keep:
+            self.log('val_label_loss', label_loss_value, sync_dist=True)
         
 
         # Reset access registry

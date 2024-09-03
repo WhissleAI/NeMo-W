@@ -1,38 +1,37 @@
 sample_rate: 16000
-log_prediction: true
+log_prediction: false
 ctc_reduction: mean_batch
 skip_nan_grad: false
+a_model_name: BPE:stt_en_conformer_ctc_large # CHANGE, BPE: is a must since, it is used to load audio encoder.
+labelled_manifest: False # CHANGE
+exp_dir: /tmp/bld56_dataset_v1/tmp/ # CHANGE
+wandb:
+  run_name: "snr_0.7_ada+df" # CHANGE
+  project: "NEMO_TEST" # CHANGE
+  create_wandb_logger: false # CHANGE
+  log_model: False # CHANGE
+
+use_video_modality: false # CHANGE
+use_pretrained_dec: true # CHANGE
 train_ds:
-  manifest_filepath:
-  - - /data2/nemo_asr/nemo_asr_set_3.0/bucket1/tarred_audio_manifest.json
-  - - /data2/nemo_asr/nemo_asr_set_3.0/bucket2/tarred_audio_manifest.json
-  - - /data2/nemo_asr/nemo_asr_set_3.0/bucket3/tarred_audio_manifest.json
-  - - /data2/nemo_asr/nemo_asr_set_3.0/bucket4/tarred_audio_manifest.json
-  - - /data2/nemo_asr/nemo_asr_set_3.0/bucket5/tarred_audio_manifest.json
-  - - /data2/nemo_asr/nemo_asr_set_3.0/bucket6/tarred_audio_manifest.json
-  - - /data2/nemo_asr/nemo_asr_set_3.0/bucket7/tarred_audio_manifest.json
-  - - /data2/nemo_asr/nemo_asr_set_3.0/bucket8/tarred_audio_manifest.json
+  manifest_filepath: /tmp/bld56_dataset_v1/it1_70/annotations/manifest_train_no_label.json # CHANGE
+  video_frame_rate: 5 # CHANGE
+  get_vid_feats: true # CHANGE, always keep it to true.
+  get_zero_vid_feats: false # CHANGE
   sample_rate: 16000
-  batch_size: 1
+  batch_size: 8 # CHANGE
   shuffle: true
-  num_workers: 4
+  num_workers: 12 # CHANGE
   pin_memory: true
   use_start_end_token: false
   trim_silence: false
-  max_duration: 10.0
+  max_duration: 20.0 # CHANGE
   min_duration: 0.1
-  is_tarred: true
-  tarred_audio_filepaths:
-  - - /data2/nemo_asr/nemo_asr_set_3.0/bucket1/audio__OP_0..8191_CL_.tar
-  - - /data2/nemo_asr/nemo_asr_set_3.0/bucket2/audio__OP_0..8191_CL_.tar
-  - - /data2/nemo_asr/nemo_asr_set_3.0/bucket3/audio__OP_0..8191_CL_.tar
-  - - /data2/nemo_asr/nemo_asr_set_3.0/bucket4/audio__OP_0..8191_CL_.tar
-  - - /data2/nemo_asr/nemo_asr_set_3.0/bucket5/audio__OP_0..8191_CL_.tar
-  - - /data2/nemo_asr/nemo_asr_set_3.0/bucket6/audio__OP_0..8191_CL_.tar
-  - - /data2/nemo_asr/nemo_asr_set_3.0/bucket7/audio__OP_0..8191_CL_.tar
-  - - /data2/nemo_asr/nemo_asr_set_3.0/bucket8/audio__OP_0..8191_CL_.tar
+  is_tarred: false # CHANGE
+  tarred_audio_filepaths: null # CHANGE
   shuffle_n: 2048
   bucketing_strategy: synced_randomized
+  override_snr_ratio: 0.6 # CHANGE if float, then coniders as snr, if None then goes by manifest.
   bucketing_batch_size:
   - 34
   - 30
@@ -43,35 +42,47 @@ train_ds:
   - 12
   - 8
 validation_ds:
-  manifest_filepath:
-  - /manifests/librispeech/librivox-dev-other.json
-  - /manifests/librispeech/librivox-dev-clean.json
-  - /manifests/librispeech/librivox-test-other.json
-  - /manifests/librispeech/librivox-test-clean.json
+  manifest_filepath: /tmp/bld56_dataset_v1/it1_70/annotations/manifest_eval_no_label.json # CHANGE
+  video_frame_rate: 5 # CHANGE
+  get_vid_feats: true # CHANGE, always keep it to true.
+  get_zero_vid_feats: false # CHANGE
   sample_rate: 16000
   batch_size: 32
   shuffle: false
-  num_workers: 8
+  num_workers: 12
   pin_memory: true
+  override_snr_ratio: 0.6 # CHANGE if float, then coniders as snr, if None then goes by manifest.
   use_start_end_token: false
 test_ds:
-  manifest_filepath:
-  - /manifests/librispeech/librivox-dev-other.json
-  - /manifests/librispeech/librivox-dev-clean.json
-  - /manifests/librispeech/librivox-test-other.json
-  - /manifests/librispeech/librivox-test-clean.json
+  manifest_filepath: /tmp/bld56_dataset_v1/it1_70/annotations/manifest_eval_no_label.json # CHANGE
+  video_frame_rate: 5 # CHANGE
+  get_vid_feats: true # CHANGE, always keep it to true.
+  get_zero_vid_feats: false # CHANGE
   sample_rate: 16000
   batch_size: 32
   shuffle: false
-  num_workers: 8
+  num_workers: 12
   pin_memory: true
+  override_snr_ratio: 0.6 # CHANGE if float, then coniders as snr, if None then goes by manifest.
   use_start_end_token: false
-tokenizer:
-  dir: /tokenizers/NeMo_ASR_SET/English/asr_set_3.0/tokenizer_spe_unigram_v128
+
+# NEW TOKENIZER 
+# tokenizer: # CHANGE
+#   dir: /home/bld56/gsoc/nemo/NeMo-opensource/tutorials/asr/tokenizers/av_tokenizer/final_tokenizer/
+#   type: bpe
+#   model_path: /home/bld56/gsoc/nemo/NeMo-opensource/tutorials/asr/tokenizers/av_tokenizer/final_tokenizer/tokenizer.model
+#   vocab_path: /home/bld56/gsoc/nemo/NeMo-opensource/tutorials/asr/tokenizers/av_tokenizer/final_tokenizer/vocab.txt
+#   spe_tokenizer_vocab: /home/bld56/gsoc/nemo/NeMo-opensource/tutorials/asr/tokenizers/av_tokenizer/final_tokenizer/tokenizer.vocab
+
+
+# OLD TOKENIZER
+tokenizer: # CHANGE # CHANGE THE NUM CLASSES TO 128 in DEC
+  dir: /home/bld56/gsoc/nemo/NeMo-opensource/tutorials/asr/tokenizers/av_tokenizer/init_toknizer/
   type: bpe
-  model_path: nemo:e06949b0b85a485e9f280ea6d19e5492_tokenizer.model
-  vocab_path: nemo:53bbc634b62446de83525753e95a50ac_vocab.txt
-  spe_tokenizer_vocab: nemo:ff63e3c43c5f4b95bff702425366a4a6_tokenizer.vocab
+  model_path: /home/bld56/gsoc/nemo/NeMo-opensource/tutorials/asr/tokenizers/av_tokenizer/init_toknizer/tokenizer.model
+  vocab_path: /home/bld56/gsoc/nemo/NeMo-opensource/tutorials/asr/tokenizers/av_tokenizer/init_toknizer/vocab.txt
+  spe_tokenizer_vocab: /home/bld56/gsoc/nemo/NeMo-opensource/tutorials/asr/tokenizers/av_tokenizer/init_toknizer/tokenizer.vocab
+
 preprocessor:
   _target_: nemo.collections.asr.modules.AudioToMelSpectrogramPreprocessor
   sample_rate: 16000
@@ -92,6 +103,17 @@ spec_augment:
   time_masks: 10
   freq_width: 27
   time_width: 0.05
+
+av_encoder: # CHANGE
+  d_model: 512
+  nhead: 8
+  num_layers: 4
+  dropout: 0.1
+
+v_model: # CHANGE
+  feat_dim: 512
+
+
 encoder:
   _target_: nemo.collections.asr.modules.ConformerEncoder
   feat_in: 80
@@ -118,7 +140,7 @@ encoder:
 decoder:
   _target_: nemo.collections.asr.modules.ConvASRDecoder
   feat_in: 512
-  num_classes: 128
+  num_classes: 128 # CHANGE to 356 for new tok, else 128.
   vocabulary:
   - <unk>
   - ▁
@@ -258,12 +280,30 @@ optim:
   sched:
     name: NoamAnnealing
     d_model: 512
-    warmup_steps: 10000
+    warmup_steps: 2000
     warmup_ratio: null
     min_lr: 1.0e-06
-compute_eval_loss: false
+compute_eval_loss: false # CHANGE
+
+adapters: # CHANGE
+  linear_adapter:
+    keep: false
+    name: "AV_v1" #@param {type:"string"}
+    dim: 64 #@param {type:"integer"}
+    activation: "swish" #@param {type:"string"}
+    norm_position: "pre" #@param ["pre", "post"]
+    dropout: 0.1 #@param {type:"number"}
+  multi_head_attention_adapter: 
+    keep: false # TODO @Balu: Needs deeper understanding of config. ref: tutorials/asr/asr_adapters/ASR_with_Adapters.ipynb
+  rel_position_multi_head_attention_adapter:
+    keep: false # TODO @Balu: Needs deeper understanding of config. ref: tutorials/asr/asr_adapters/ASR_with_Adapters.ipynb
+
+  
+
+
+
 variational_noise:
   start_step: 0
   std: 0.0
-target: nemo.collections.asr.models.ctc_bpe_models.EncDecCTCModelBPE
+target: nemo.collections.asr.models.ctc_bpe_models.AV_EncDecCTCModelBPE
 nemo_version: 1.9.0rc0
