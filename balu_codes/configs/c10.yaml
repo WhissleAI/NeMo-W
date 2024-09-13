@@ -13,7 +13,7 @@ wandb:
 use_video_modality: true
 use_pretrained_dec: false
 train_ds:
-  manifest_filepath: /tmp/bld56_dataset_v1/it2/annotations/manifest_train_no_label.json
+  manifest_filepath: /tmp/bld56_dataset_v1/it2/annotations/manifest_train.json
   video_frame_rate: 5
   get_vid_feats: true
   get_zero_vid_feats: true
@@ -53,7 +53,7 @@ validation_ds:
   override_snr_ratio: 0.5
   use_start_end_token: false
 test_ds:
-  manifest_filepath: /tmp/bld56_dataset_v1/it2/annotations/manifest_test_no_label.json
+  manifest_filepath: /tmp/bld56_dataset_v1/it2/annotations/manifest_test.json
   video_frame_rate: 5
   get_vid_feats: true
   get_zero_vid_feats: true

@@ -99,8 +99,12 @@ def setup_exp_manager(trainer, model):
 # Main function to execute the workflow
 def main(config_file_path, args):
     model, conf = load_and_configure_model(config_file_path)
-    if args.resume_pretrained:
-        ckpt_path = f"/tmp/bld56_dataset_v1/saved_models/pre_av_ndec_uman_ntok--val_u_wer=0.0809-epoch=11.ckpt"
+    if args.resume_pretrained and False:
+        print(f"{args.resume_pretrained} is set")
+        # ckpt_path = f"/tmp/bld56_dataset_v1/saved_models/pre_av_ndec_uman_ntok--val_u_wer=0.0809-epoch=11.ckpt"
+        ckpt_path = f"/tmp/bld56_dataset_v1/tmp/av_ndec_lman_ntokpre+/2024-09-07_06-19-52/checkpoints/av_ndec_lman_ntokpre+--val_u_wer=0.4031-epoch=10-last.ckpt"
+        # ckpt_path = f"/tmp/bld56_dataset_v1/saved_models/av_ndec_lman_ntokpre_snr0.5/checkpoints/av_ndec_lman_ntokpre+--val_u_wer=0.3356-epoch=6.ckpt"
+        # ckpt_path = f"/tmp/bld56_dataset_v1/tmp/av_ndec_lman_ntokpre+/2024-09-06_14-22-50/checkpoints/av_ndec_lman_ntokpre+--val_u_wer=0.2183-epoch=2.ckpt"
         checkpoint = torch.load(ckpt_path)
         model.load_state_dict(checkpoint['state_dict'])
         print(model)
@@ -110,18 +114,30 @@ def main(config_file_path, args):
     trainer = setup_trainer()
     model.set_trainer(trainer)
     logdir = setup_exp_manager(trainer, model)
-    trainer.fit(model)
-    # trainer.validate(model)
+    #trainer.fit(model)
+    model.eval()
+    trainer.validate(model)
+
+def float_or_str(value):
+    try:
+        # Try to parse it as an integer
+        return float(value)
+    except ValueError:
+        # If it fails, try to parse it as a float
+        try:
+            return str(value)
+        except ValueError:
+            raise argparse.ArgumentTypeError(f"Value '{value}' is neither int nor float")
 
 if __name__ == "__main__":
     # add config number args
     parser = argparse.ArgumentParser(description='Train AV ASR model')
     parser.add_argument('--config', type=int, default=5, help='Config number to use for training')
-    parser.add_argument('--snr', type=float, default=0.7, help='SNR ratio to use for training')
+    parser.add_argument('--snr', type=float_or_str, default=0.7, help='SNR ratio to use for training')
     parser.add_argument('--gpus', type=int, default=1, help='Number of GPUs to use for training')
     parser.add_argument('--resume_pretrained', type=bool, default=False, help='Resume training from pretrained model')
     args = parser.parse_args()
-    config_file_path = f"/home/bld56/gsoc/nemo/NeMo-opensource/balu_codes/configs/c{args.config}.yaml"
+    config_file_path = f"/home/bld56/gsoc/nemo/NeMo-opensource/balu_codes/final_configs_icassp_24/c{args.config}.yaml"
     # load yaml file
     with open(config_file_path) as file:
         config = OmegaConf.load(file)

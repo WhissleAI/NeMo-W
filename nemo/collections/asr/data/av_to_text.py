@@ -423,6 +423,12 @@ class _AVTextDataset(Dataset):
         self.get_vid_feats = get_vid_feats
         self.get_zero_vid_feats = get_zero_vid_feats
         self.override_snr_ratio = override_snr_ratio
+        self.uniform_snr_list = None
+        # choose a list of snr ratios from 0.2 to 0.6 with step 0.1 for __len__ samples
+        if self.override_snr_ratio == "rand":
+            # set seed as 42
+            np.random.seed(42)
+            self.uniform_snr_list = np.random.uniform(0.3, 0.6, self.__len__())
 
     def get_manifest_sample(self, sample_id):
         return self.manifest_processor.collection[sample_id]
@@ -442,9 +448,12 @@ class _AVTextDataset(Dataset):
         current_rms = self.calculate_rms(audio)
         return audio * (target_rms / (current_rms + 1e-9))  # Avoid division by zero
 
-    def _mix_audios(self, noisy_audio_feats, clean_audio_feats, snr, target_sr=16000):
+    def _mix_audios(self, noisy_audio_feats, clean_audio_feats, index, snr, target_sr=16000):
         if self.override_snr_ratio is not None:
-            snr = self.override_snr_ratio
+            if self.override_snr_ratio == "rand":
+                snr = self.uniform_snr_list[index]
+            else:
+                snr = self.override_snr_ratio
         rms1 = self.calculate_rms(clean_audio_feats)
         rms2 = self.calculate_rms(noisy_audio_feats)
         mean_rms = (rms1 + rms2) / 2
@@ -452,12 +461,13 @@ class _AVTextDataset(Dataset):
         noisy_audio_feats = self.adjust_volume(noisy_audio_feats, mean_rms)
         clean_audio_feats = self.adjust_volume(clean_audio_feats, mean_rms)
         
-        assert len(clean_audio_feats) >= 10*target_sr, f"Audio length is too short: {len(clean_audio_feats)}"
+        # assert len(clean_audio_feats) >= 10*target_sr, f"Audio length is too short: {len(clean_audio_feats)}"
         
         if len(noisy_audio_feats) < len(clean_audio_feats):
             noisy_audio_feats = torch.nn.functional.pad(noisy_audio_feats, (0, len(clean_audio_feats) - len(noisy_audio_feats)))
 
-        min_len = min(10*target_sr, len(clean_audio_feats))
+        # min_len = min(10*target_sr, len(clean_audio_feats))
+        min_len = min(len(clean_audio_feats), len(noisy_audio_feats))
         noisy_audio_feats = noisy_audio_feats[:min_len]
         clean_audio_feats = clean_audio_feats[:min_len]
         
@@ -481,12 +491,12 @@ class _AVTextDataset(Dataset):
             orig_sr=sample.orig_sr,
             channel_selector=self.channel_selector,
         )
-        if self.override_snr_ratio != 0.0: 
+        if self.override_snr_ratio != float(0): 
             audio = AudioSegment.from_file(sample.video_file, format="mp4")
             samples_pydub = np.array(audio.get_array_of_samples(), dtype=np.float32)
             noise_features = torch.tensor(samples_pydub, dtype=torch.float32)
             noise_features = noise_features / (2**(8 * audio.sample_width) / 2)
-            mixed_features = self._mix_audios(noise_features, clean_audio_features, snr = sample.snr)
+            mixed_features = self._mix_audios(noise_features, clean_audio_features, index, snr = sample.snr)
         else:
             mixed_features = clean_audio_features
         f, fl = mixed_features, torch.tensor(mixed_features.shape[0]).long()
@@ -509,7 +519,7 @@ class _AVTextDataset(Dataset):
                 vf = vf.float()
             else:
                 vf = torch.zeros(
-                    self.video_frame_rate*sample.duration, 768).float()
+                    int(self.video_frame_rate * 10), 768).float()
         
         t, tl = self.manifest_processor.process_text_by_sample(sample=sample)
 

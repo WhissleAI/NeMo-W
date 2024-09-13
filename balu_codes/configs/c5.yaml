@@ -30,7 +30,7 @@ train_ds:
   tarred_audio_filepaths: null
   shuffle_n: 2048
   bucketing_strategy: synced_randomized
-  override_snr_ratio: 0.5
+  override_snr_ratio: 0.909091
   bucketing_batch_size:
   - 34
   - 30
@@ -50,7 +50,7 @@ validation_ds:
   shuffle: false
   num_workers: 10
   pin_memory: true
-  override_snr_ratio: 0.5
+  override_snr_ratio: 0.909091
   use_start_end_token: false
 test_ds:
   manifest_filepath: /tmp/bld56_dataset_v1/it2/annotations/manifest_eval.json
@@ -62,7 +62,7 @@ test_ds:
   shuffle: false
   num_workers: 10
   pin_memory: true
-  override_snr_ratio: 0.5
+  override_snr_ratio: 0.909091
   use_start_end_token: false
 tokenizer:
   dir: /home/bld56/gsoc/nemo/NeMo-opensource/tutorials/asr/tokenizers/av_tokenizer/final_tokenizer/
