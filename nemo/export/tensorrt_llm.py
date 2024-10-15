@@ -41,25 +41,26 @@ from nemo.export.trt_llm.nemo_ckpt_loader.nemo_file import (
     is_nemo_file,
     load_nemo_model,
 )
+from nemo.export.trt_llm.qnemo import qnemo_to_tensorrt_llm
+from nemo.export.trt_llm.qnemo.tokenizer_utils import get_nmt_tokenizer
+from nemo.export.trt_llm.qnemo.utils import is_qnemo_checkpoint
 from nemo.export.trt_llm.tensorrt_llm_build import build_and_save_engine
-from nemo.export.trt_llm.tensorrt_llm_run import generate, generate_streaming, load, load_distributed, refit
-
-LOGGER = logging.getLogger("NeMo")
-
-use_model_opt = True
-try:
-    from nemo.export.trt_llm.qnemo import qnemo_to_tensorrt_llm
-    from nemo.export.trt_llm.qnemo.tokenizer_utils import get_nmt_tokenizer
-    from nemo.export.trt_llm.qnemo.utils import is_qnemo_checkpoint
-except Exception as e:
-    LOGGER.warning(f"Cannot import the Model Optimizer, it will not be available. {type(e).__name__}: {e}")
-    use_model_opt = False
+from nemo.export.trt_llm.tensorrt_llm_run import (
+    generate,
+    generate_streaming,
+    load,
+    load_distributed,
+    refit,
+    unload_engine,
+)
 
 use_deploy = True
 try:
     from nemo.deploy.utils import cast_output, str_ndarray2list
 except Exception as e:
     use_deploy = False
+
+LOGGER = logging.getLogger("NeMo")
 
 
 @wrapt.decorator
@@ -106,6 +107,7 @@ class TensorRTLLM(ITritonDeployable):
         use_python_runtime: bool = True,
         enable_chunked_context: bool = None,
         max_tokens_in_paged_kv_cache: int = None,
+        multi_block_mode: bool = False,
     ):
         """
         Args:
@@ -113,6 +115,7 @@ class TensorRTLLM(ITritonDeployable):
             lora_ckpt_list (List[str]): lora checkpoint paths.
             load_model (bool): load TensorRT-LLM model if the engine files exist in the model_dir.
             use_python_runtime (bool): whether to use python or c++ runtime.
+            multi_block_mode (bool): enable faster decoding in multihead attention. Required for long context. Only available when using c++ runtime
         """
 
         if use_python_runtime:
@@ -128,6 +131,7 @@ class TensorRTLLM(ITritonDeployable):
         self.use_python_runtime = use_python_runtime
         self.enable_chunked_context = enable_chunked_context if enable_chunked_context is not None else False
         self.max_tokens_in_paged_kv_cache = max_tokens_in_paged_kv_cache
+        self.multi_block_mode = multi_block_mode
         self.model = None
         self.tokenizer = None
         self.n_gpus = None
@@ -146,16 +150,16 @@ class TensorRTLLM(ITritonDeployable):
         nemo_checkpoint_path: str,
         model_type: Optional[str] = None,
         delete_existing_files: bool = True,
-        n_gpus: int = None,
+        n_gpus: Optional[int] = None,
         tensor_parallelism_size: int = 1,
         pipeline_parallelism_size: int = 1,
-        gpus_per_node: int = None,
+        gpus_per_node: Optional[int] = None,
         max_input_len: int = 256,
-        max_output_len: int = 256,
+        max_output_len: Optional[int] = 256,
         max_input_token: Optional[int] = None,
         max_output_token: Optional[int] = None,
         max_batch_size: int = 8,
-        max_prompt_embedding_table_size=None,
+        max_prompt_embedding_table_size: Optional[int] = None,
         use_parallel_embedding: bool = False,
         use_embedding_sharing: bool = False,
         paged_kv_cache: bool = True,
@@ -163,16 +167,18 @@ class TensorRTLLM(ITritonDeployable):
         paged_context_fmha: bool = False,
         dtype: str = "bfloat16",
         load_model: bool = True,
-        enable_multi_block_mode: bool = False,
         use_lora_plugin: str = None,
         lora_target_modules: List[str] = None,
         max_lora_rank: int = 64,
-        max_num_tokens: int = None,
-        opt_num_tokens: int = None,
-        max_seq_len: int = None,
+        max_num_tokens: Optional[int] = None,
+        opt_num_tokens: Optional[int] = None,
+        max_seq_len: Optional[int] = None,
         multiple_profiles: bool = False,
         gpt_attention_plugin: str = "auto",
         gemm_plugin: str = "auto",
+        reduce_fusion: bool = True,
+        fp8_quantized: Optional[bool] = None,
+        fp8_kvcache: Optional[bool] = None,
     ):
         """
         Exports nemo checkpoints to TensorRT-LLM.
@@ -198,16 +204,18 @@ class TensorRTLLM(ITritonDeployable):
             remove_input_padding (bool): enables removing input padding or not.
             dtype (str): Floating point type for model weights (Supports BFloat16/Float16).
             load_model (bool): load TensorRT-LLM model after the export.
-            enable_multi_block_mode (bool): enable faster decoding in multihead attention. Required for long context.
             use_lora_plugin (str): use dynamic lora or not.
             lora_target_modules (List[str]): list of the target lora modules.
             max_lora_rank (int): maximum lora rank.
             max_num_tokens (int):
             opt_num_tokens (int):
-            max_seq_len (int):
+            max_seq_len (int): the maximum sequence length of a single request.
             multiple_profiles: (bool): enables multiple profiles feature of TRT-LLM. Default = False
             gpt_attention_plugin (str): enable the gpt attention plugin. Default = "auto"
             gemm_plugin (str): enable the gpt plugin. Default = "auto"
+            reduce_fusion (bool): enables fusing extra kernels after custom TRT-LLM allReduce
+            fp8_quantized (Optional[bool]): enables exporting to FP8 TRT-LLM checkpoints. If not set, autodetects the type.
+            fp8_kvcache (Optional[bool]): enables FP8 KV-cache quantization. If not set, autodetects the type.
         """
 
         if n_gpus is not None:
@@ -258,16 +266,28 @@ class TensorRTLLM(ITritonDeployable):
             )
             max_output_len = max_output_token
 
+        if max_output_len is not None:
+            warnings.warn(
+                "Parameter max_output_len is deprecated and will be removed. Please use max_seq_len instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            if max_seq_len is None:
+                max_seq_len = max_input_len + max_output_len
+
+        if max_batch_size < 4:
+            warnings.warn(
+                "TensorRT LLM may hit a runtime issue with batch size is smaller than 4 on some models."
+                " Force set to 4",
+                stacklevel=2,
+            )
+            max_batch_size = 4
+
         if tensorrt_llm.mpi_rank() == 0:
             tmp_dir = tempfile.TemporaryDirectory()
             nemo_export_dir = Path(tmp_dir.name)
 
-            is_qnemo_ckpt = False
-            if use_model_opt:
-                if is_qnemo_checkpoint(nemo_checkpoint_path):
-                    is_qnemo_ckpt = True
-
-            if is_qnemo_ckpt:
+            if is_qnemo_checkpoint(nemo_checkpoint_path):
                 if os.path.isdir(nemo_checkpoint_path):
                     nemo_export_dir = nemo_checkpoint_path
                 else:
@@ -279,20 +299,22 @@ class TensorRTLLM(ITritonDeployable):
                     nemo_checkpoint_path=nemo_checkpoint_path,
                     engine_dir=self.model_dir,
                     max_input_len=max_input_len,
-                    max_output_len=max_output_len,
+                    max_seq_len=max_seq_len,
                     max_batch_size=max_batch_size,
                     max_prompt_embedding_table_size=max_prompt_embedding_table_size,
                     tensor_parallel_size=tensor_parallelism_size,
                     pipeline_parallel_size=pipeline_parallelism_size,
                     use_parallel_embedding=use_parallel_embedding,
                     paged_kv_cache=paged_kv_cache,
+                    paged_context_fmha=paged_context_fmha,
                     remove_input_padding=remove_input_padding,
-                    enable_multi_block_mode=enable_multi_block_mode,
                     use_lora_plugin=use_lora_plugin,
                     lora_target_modules=lora_target_modules,
                     max_lora_rank=max_lora_rank,
                     max_num_tokens=max_num_tokens,
                     opt_num_tokens=opt_num_tokens,
+                    multiple_profiles=multiple_profiles,
+                    reduce_fusion=reduce_fusion,
                 )
             else:
                 if model_type is None:
@@ -322,6 +344,8 @@ class TensorRTLLM(ITritonDeployable):
                     gpus_per_node=gpus_per_node,
                     use_parallel_embedding=use_parallel_embedding,
                     use_embedding_sharing=use_embedding_sharing,
+                    fp8_quantized=fp8_quantized,
+                    fp8_kvcache=fp8_kvcache,
                 )
 
                 for weight_dict, model_config in zip(weights_dicts, model_configs):
@@ -338,7 +362,6 @@ class TensorRTLLM(ITritonDeployable):
                         max_lora_rank=max_lora_rank,
                         lora_target_modules=lora_target_modules,
                         max_prompt_embedding_table_size=max_prompt_embedding_table_size,
-                        enable_multi_block_mode=enable_multi_block_mode,
                         paged_kv_cache=paged_kv_cache,
                         remove_input_padding=remove_input_padding,
                         paged_context_fmha=paged_context_fmha,
@@ -489,12 +512,12 @@ class TensorRTLLM(ITritonDeployable):
         engine = build_and_save_engine(
             max_input_len=max_input_len,
             max_output_len=max_output_len,
+            max_seq_len=max_input_len + max_output_len,
             max_batch_size=max_batch_size,
             model_config=model_config[0],
             model_weights=weights[0],
             model_dir=self.model_dir,
             model_type=model_type,
-            custom_all_reduce=False,
             use_refit=use_refit,
         )
         torch.distributed.barrier()
@@ -958,6 +981,7 @@ class TensorRTLLM(ITritonDeployable):
                         use_python_runtime=self.use_python_runtime,
                         enable_chunked_context=self.enable_chunked_context,
                         max_tokens_in_paged_kv_cache=self.max_tokens_in_paged_kv_cache,
+                        multi_block_mode=self.multi_block_mode,
                     )
                     self._load_prompt_tables()
                 except Exception as error:
@@ -966,3 +990,6 @@ class TensorRTLLM(ITritonDeployable):
                         "model needs to be exported again. "
                         "Error message: " + repr(error)
                     ) from error
+
+    def unload_engine(self):
+        unload_engine()
