@@ -22,32 +22,38 @@ import numpy as np
 import torch
 from omegaconf import DictConfig, OmegaConf, open_dict
 from pytorch_lightning import Trainer
-from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 
 from nemo.collections.asr.data import audio_to_text_dataset
-from nemo.collections.asr.data.audio_to_text import _AudioTextDataset
-from nemo.collections.asr.data.audio_to_text_dali import AudioToCharDALIDataset, DALIOutputs
-from nemo.collections.asr.data.audio_to_text_lhotse import LhotseSpeechToTextBpeDataset
+from nemo.collections.asr.data.av_to_text import _AVTextDataset
+# from nemo.collections.asr.data.audio_to_text_dali import AudioToCharDALIDataset, DALIOutputs
+# from nemo.collections.asr.data.audio_to_text_lhotse import LhotseSpeechToTextBpeDataset
+from nemo.collections.asr.models.ctc_models import EncDecCTCModel
+from nemo.collections.asr.models.ctc_bpe_models import EncDecCTCModelBPE
 from nemo.collections.asr.losses.ctc import CTCLoss
-from nemo.collections.asr.metrics.wer import WER
+from nemo.collections.asr.metrics.av_wer import AV_WER
 from nemo.collections.asr.models.asr_model import ASRModel, ExportableEncDecModel
 from nemo.collections.asr.parts.mixins import ASRModuleMixin, ASRTranscriptionMixin, InterCTCMixin, TranscribeConfig
 from nemo.collections.asr.parts.mixins.transcription import GenericTranscriptionType, TranscriptionReturnType
-from nemo.collections.asr.parts.preprocessing.segment import ChannelSelectorType
 from nemo.collections.asr.parts.submodules.ctc_decoding import CTCDecoding, CTCDecodingConfig
 from nemo.collections.asr.parts.utils.asr_batching import get_semi_sorted_batch_sampler
-from nemo.collections.common.data.lhotse import get_lhotse_dataloader_from_config
+from nemo.collections.asr.parts.utils.audio_utils import ChannelSelectorType
+# from nemo.collections.common.data.lhotse import get_lhotse_dataloader_from_config
 from nemo.collections.common.parts.preprocessing.parsers import make_parser
 from nemo.core.classes.common import PretrainedModelInfo, typecheck
 from nemo.core.classes.mixins import AccessMixin
-from nemo.core.neural_types import AudioSignal, LabelsType, LengthsType, LogprobsType, NeuralType, SpectrogramType
+from nemo.core.neural_types import AudioSignal, LabelsType, LengthsType, LogprobsType, NeuralType, SpectrogramType, ImageFeatureValue
 from nemo.utils import logging
 
-__all__ = ['EncDecCTCModel']
+#ADAPTERS
+from nemo.core import adapter_mixins
+from nemo.collections.common.parts.adapter_modules import LinearAdapterConfig
+from nemo.collections.asr.parts.submodules.adapters.multi_head_attention_adapter_module import MultiHeadAttentionAdapterConfig
+from nemo.collections.asr.parts.submodules.adapters.multi_head_attention_adapter_module import RelPositionMultiHeadAttentionAdapterConfig
+__all__ = ['AV_EncDecCTCModel']
 
 
-class EncDecCTCModel(ASRModel, ExportableEncDecModel, ASRModuleMixin, InterCTCMixin, ASRTranscriptionMixin):
+class AV_EncDecCTCModel(ASRModel, ExportableEncDecModel, ASRModuleMixin, InterCTCMixin, ASRTranscriptionMixin):
     """Base class for encoder decoder CTC-based models."""
 
     def __init__(self, cfg: DictConfig, trainer: Trainer = None):
@@ -58,14 +64,34 @@ class EncDecCTCModel(ASRModel, ExportableEncDecModel, ASRModuleMixin, InterCTCMi
             self.world_size = trainer.world_size
 
         super().__init__(cfg=cfg, trainer=trainer)
-        self.preprocessor = EncDecCTCModel.from_config_dict(self._cfg.preprocessor)
-        self.encoder = EncDecCTCModel.from_config_dict(self._cfg.encoder)
-
+        if "BPE:" in cfg.a_model_name:
+            a_model_cfg = EncDecCTCModelBPE.from_pretrained(cfg.a_model_name[4:], return_config=True)
+            a_model_cfg = self.update_model_config_to_support_adapter(a_model_cfg) # for adapters
+            self.a_model = EncDecCTCModelBPE.from_pretrained(cfg.a_model_name[4:], override_config_path=a_model_cfg)
+        else:
+            a_model_cfg = EncDecCTCModel.from_pretrained(cfg.a_model_name, return_config=True)
+            a_model_cfg = self.update_model_config_to_support_adapter(a_model_cfg)
+            self.a_model = EncDecCTCModel.from_pretrained(cfg.a_model_name, override_config_path=a_model_cfg)
+        
+        self.labelled_manifest = cfg.labelled_manifest
+        
+        
+        if cfg.adapters.linear_adapter.keep:
+            linear_adapter_cfg = LinearAdapterConfig(
+                in_features=self.a_model.encoder.d_model,
+                dim = cfg.adapters.linear_adapter.dim,
+                activation=cfg.adapters.linear_adapter.activation,
+                norm_position=cfg.adapters.linear_adapter.norm_position,
+                dropout=cfg.adapters.linear_adapter.dropout,
+            )
+            linear_adapter_name = cfg.adapters.linear_adapter.name
+            self.a_model.add_adapter(name=linear_adapter_name, cfg=linear_adapter_cfg)
         with open_dict(self._cfg):
             if "feat_in" not in self._cfg.decoder or (
                 not self._cfg.decoder.feat_in and hasattr(self.encoder, '_feat_out')
             ):
                 self._cfg.decoder.feat_in = self.encoder._feat_out
+            if "feat_in" not in self._cfg.decoder or not self._cfg.decoder.feat_in:
                 raise ValueError("param feat_in of the decoder's config is not set!")
 
             if self.cfg.decoder.num_classes < 1 and self.cfg.decoder.vocabulary is not None:
@@ -75,20 +101,31 @@ class EncDecCTCModel(ASRModel, ExportableEncDecModel, ASRModuleMixin, InterCTCMi
                     )
                 )
                 cfg.decoder["num_classes"] = len(self.cfg.decoder.vocabulary)
+        assert not (self.cfg.use_pretrained_dec and self.cfg.use_video_modality), "Pretrained decoder is not supported for video modality"
 
+        # initialize a transformer encoder and decoder
+        if cfg.use_video_modality:
+            self.a_linear = torch.nn.Linear(in_features = self.a_model.encoder._feat_out, out_features = self.cfg.av_encoder.d_model)
+            self.v_linear = torch.nn.Linear(in_features = self.cfg.v_model.feat_dim, out_features = self.cfg.av_encoder.d_model)
+            self.av_enocder_layer = torch.nn.TransformerEncoderLayer(d_model = self.cfg.av_encoder.d_model, nhead = self.cfg.av_encoder.nhead, dropout = self.cfg.av_encoder.dropout, batch_first=True)
+            self.av_encoder = torch.nn.TransformerEncoder(self.av_enocder_layer, num_layers = self.cfg.av_encoder.num_layers)
+        
+            # Modality embeddings
+            self.a_modal_embs = torch.nn.Embedding(1, self.cfg.av_encoder.d_model)
+            self.v_modal_embs = torch.nn.Embedding(1, self.cfg.av_encoder.d_model)
+        
+            # Trainable positional encodings
+            self.a_pos_enc = torch.nn.Embedding(10000, self.cfg.av_encoder.d_model)
+            self.v_pos_enc = torch.nn.Embedding(10000, self.cfg.av_encoder.d_model)
+
+        
         self.decoder = EncDecCTCModel.from_config_dict(self._cfg.decoder)
-
         self.loss = CTCLoss(
             num_classes=self.decoder.num_classes_with_blank - 1,
             zero_infinity=True,
             reduction=self._cfg.get("ctc_reduction", "mean_batch"),
         )
-
-        if hasattr(self._cfg, 'spec_augment') and self._cfg.spec_augment is not None:
-            self.spec_augmentation = EncDecCTCModel.from_config_dict(self._cfg.spec_augment)
-        else:
-            self.spec_augmentation = None
-
+        
         # Setup decoding objects
         decoding_cfg = self.cfg.get('decoding', None)
 
@@ -101,11 +138,12 @@ class EncDecCTCModel(ASRModel, ExportableEncDecModel, ASRModuleMixin, InterCTCMi
         self.decoding = CTCDecoding(self.cfg.decoding, vocabulary=OmegaConf.to_container(self.decoder.vocabulary))
 
         # Setup metric with decoding strategy
-        self.wer = WER(
+        self.wer = AV_WER(
             decoding=self.decoding,
             use_cer=self._cfg.get('use_cer', False),
             dist_sync_on_step=True,
             log_prediction=self._cfg.get("log_prediction", False),
+            labelled_manifest=self.labelled_manifest
         )
 
         # Setup optional Optimization flags
@@ -114,12 +152,18 @@ class EncDecCTCModel(ASRModel, ExportableEncDecModel, ASRModuleMixin, InterCTCMi
         # setting up interCTC loss (from InterCTCMixin)
         self.setup_interctc(decoder_name='decoder', loss_name='loss', wer_name='wer')
 
-        # Adapter modules setup (from ASRAdapterModelMixin)
-        self.setup_adapters()
+    def update_model_config_to_support_adapter(self, model_cfg):
+        with open_dict(model_cfg):
+            adapter_metadata = adapter_mixins.get_registered_adapter(model_cfg.encoder._target_)
+            if adapter_metadata is not None:
+                model_cfg.encoder._target_ = adapter_metadata.adapter_class_path
+        
+        print("Updated encoder _target_ model :", model_cfg.encoder._target_)
+        return model_cfg
 
     def transcribe(
         self,
-        audio: Union[str, List[str], torch.Tensor, np.ndarray, DataLoader],
+        audio: Union[str, List[str], torch.Tensor, np.ndarray],
         batch_size: int = 4,
         return_hypotheses: bool = False,
         num_workers: int = 0,
@@ -129,11 +173,13 @@ class EncDecCTCModel(ASRModel, ExportableEncDecModel, ASRModuleMixin, InterCTCMi
         override_config: Optional[TranscribeConfig] = None,
     ) -> TranscriptionReturnType:
         """
+        If modify this function, please remember update transcribe_partial_audio() in
+        nemo/collections/asr/parts/utils/trancribe_utils.py
+
         Uses greedy decoding to transcribe audio files. Use this method for debugging and prototyping.
 
         Args:
-            audio: (a single or list) of paths to audio files or a np.ndarray/tensor audio array or path to a manifest file.
-                Can also be a dataloader object that provides values that can be consumed by the model.
+            audio: (a single or list) of paths to audio files or a np.ndarray audio array. \
                 Recommended length per file is between 5 and 25 seconds. \
                 But it is possible to pass a few hours long file if enough GPU memory is available.
             batch_size: (int) batch size to use during inference.
@@ -211,11 +257,12 @@ class EncDecCTCModel(ASRModel, ExportableEncDecModel, ASRModuleMixin, InterCTCMi
                 decoding_cfg=decoding_cfg, vocabulary=OmegaConf.to_container(self.decoder.vocabulary)
             )
 
-            self.wer = WER(
+            self.wer = AV_WER(
                 decoding=self.decoding,
                 use_cer=self._cfg.get('use_cer', False),
                 dist_sync_on_step=True,
                 log_prediction=self._cfg.get("log_prediction", False),
+                labelled_manifest=self.labelled_manifest
             )
 
             # Update config
@@ -255,11 +302,12 @@ class EncDecCTCModel(ASRModel, ExportableEncDecModel, ASRModuleMixin, InterCTCMi
             decoding_cfg=decoding_cfg, vocabulary=OmegaConf.to_container(self.decoder.vocabulary)
         )
 
-        self.wer = WER(
+        self.wer = AV_WER(
             decoding=self.decoding,
             use_cer=self.wer.use_cer,
             log_prediction=self.wer.log_prediction,
             dist_sync_on_step=True,
+            labelled_manifest=self.labelled_manifest
         )
 
         self.decoder.temperature = decoding_cfg.get('temperature', 1.0)
@@ -275,23 +323,7 @@ class EncDecCTCModel(ASRModel, ExportableEncDecModel, ASRModuleMixin, InterCTCMi
         audio_to_text_dataset.inject_dataloader_value_from_model_config(self.cfg, config, key='sample_rate')
         audio_to_text_dataset.inject_dataloader_value_from_model_config(self.cfg, config, key='labels')
 
-        if config.get("use_lhotse"):
-            return get_lhotse_dataloader_from_config(
-                config,
-                global_rank=self.global_rank,
-                world_size=self.world_size,
-                dataset=LhotseSpeechToTextBpeDataset(
-                    tokenizer=make_parser(
-                        labels=config.get('labels', None),
-                        name=config.get('parser', 'en'),
-                        unk_id=config.get('unk_index', -1),
-                        blank_id=config.get('blank_index', -1),
-                        do_normalize=config.get('normalize_transcripts', False),
-                    ),
-                ),
-            )
-
-        dataset = audio_to_text_dataset.get_audio_to_text_char_dataset_from_config(
+        dataset = audio_to_text_dataset.get_av_to_text_char_dataset_from_config(
             config=config,
             local_rank=self.local_rank,
             global_rank=self.global_rank,
@@ -301,11 +333,7 @@ class EncDecCTCModel(ASRModel, ExportableEncDecModel, ASRModuleMixin, InterCTCMi
 
         if dataset is None:
             return None
-
-        if isinstance(dataset, AudioToCharDALIDataset):
-            # DALI Dataset implements dataloader interface
-            return dataset
-
+        
         shuffle = config['shuffle']
         if isinstance(dataset, torch.utils.data.IterableDataset):
             shuffle = False
@@ -320,8 +348,8 @@ class EncDecCTCModel(ASRModel, ExportableEncDecModel, ASRModuleMixin, InterCTCMi
             collate_fn = dataset.datasets[0].datasets[0].collate_fn
 
         batch_sampler = None
-        if config.get('use_semi_sorted_batching', False):
-            if not isinstance(dataset, _AudioTextDataset):
+        if config.get('use_semi_sorted_batching', False): # This is in usable format even for our 
+            if not isinstance(dataset, _AVTextDataset):
                 raise RuntimeError(
                     "Semi Sorted Batch sampler can be used with AudioToCharDataset or AudioToBPEDataset "
                     f"but found dataset of type {type(dataset)}"
@@ -437,13 +465,14 @@ class EncDecCTCModel(ASRModel, ExportableEncDecModel, ASRModuleMixin, InterCTCMi
 
     @property
     def input_types(self) -> Optional[Dict[str, NeuralType]]:
-        if hasattr(self.preprocessor, '_sample_rate'):
-            input_signal_eltype = AudioSignal(freq=self.preprocessor._sample_rate)
+        if hasattr(self.a_model.preprocessor, '_sample_rate'):
+            input_signal_eltype = AudioSignal(freq=self.a_model.preprocessor._sample_rate)
         else:
             input_signal_eltype = AudioSignal()
         return {
-            "input_signal": NeuralType(('B', 'T'), input_signal_eltype, optional=True),
-            "input_signal_length": NeuralType(tuple('B'), LengthsType(), optional=True),
+            "audio_input_signal": NeuralType(('B', 'T'), input_signal_eltype, optional=True),
+            "audio_input_signal_length": NeuralType(tuple('B'), LengthsType(), optional=True),
+            "video_input_signal": NeuralType(('B', 'T', 'D'), ImageFeatureValue(), optional=True),
             "processed_signal": NeuralType(('B', 'D', 'T'), SpectrogramType(), optional=True),
             "processed_signal_length": NeuralType(tuple('B'), LengthsType(), optional=True),
             "sample_id": NeuralType(tuple('B'), LengthsType(), optional=True),
@@ -459,16 +488,16 @@ class EncDecCTCModel(ASRModel, ExportableEncDecModel, ASRModuleMixin, InterCTCMi
 
     @typecheck()
     def forward(
-        self, input_signal=None, input_signal_length=None, processed_signal=None, processed_signal_length=None
+        self, audio_input_signal=None, audio_input_signal_length=None, video_input_signal= None, processed_signal=None, processed_signal_length=None
     ):
         """
         Forward pass of the model.
 
         Args:
-            input_signal: Tensor that represents a batch of raw audio signals,
+            audio_input: Tensor that represents a batch of raw audio signals,
                 of shape [B, T]. T here represents timesteps, with 1 second of audio represented as
                 `self.sample_rate` number of floating point values.
-            input_signal_length: Vector of length B, that contains the individual lengths of the audio
+            audio_input_signal_length: Vector of length B, that contains the individual lengths of the audio
                 sequences.
             processed_signal: Tensor that represents a batch of processed audio signals,
                 of shape (B, D, T) that has undergone processing via some DALI preprocessor.
@@ -481,29 +510,72 @@ class EncDecCTCModel(ASRModel, ExportableEncDecModel, ASRModuleMixin, InterCTCMi
             2) The lengths of the acoustic sequence after propagation through the encoder, of shape [B].
             3) The greedy token predictions of the model of shape [B, T] (via argmax)
         """
-        has_input_signal = input_signal is not None and input_signal_length is not None
+        has_input_signal = audio_input_signal is not None and audio_input_signal_length is not None
         has_processed_signal = processed_signal is not None and processed_signal_length is not None
         if (has_input_signal ^ has_processed_signal) == False:
             raise ValueError(
-                f"{self} Arguments ``input_signal`` and ``input_signal_length`` are mutually exclusive "
+                f"{self} Arguments ``audio_input`` and ``audio_input_signal_length`` are mutually exclusive "
                 " with ``processed_signal`` and ``processed_signal_len`` arguments."
             )
 
         if not has_processed_signal:
-            processed_signal, processed_signal_length = self.preprocessor(
-                input_signal=input_signal,
-                length=input_signal_length,
+            processed_signal, processed_signal_length = self.a_model.preprocessor(
+                input_signal=audio_input_signal, length=audio_input_signal_length,
             )
 
-        if self.spec_augmentation is not None and self.training:
-            processed_signal = self.spec_augmentation(input_spec=processed_signal, length=processed_signal_length)
+        if self.a_model.spec_augmentation is not None and self.training:
+            processed_signal = self.a_model.spec_augmentation(input_spec=processed_signal, length=processed_signal_length)
 
-        encoder_output = self.encoder(audio_signal=processed_signal, length=processed_signal_length)
+        encoder_output = self.a_model.encoder(audio_signal=processed_signal, length=processed_signal_length)
         encoded = encoder_output[0]
         encoded_len = encoder_output[1]
-        log_probs = self.decoder(encoder_output=encoded)
-        greedy_predictions = log_probs.argmax(dim=-1, keepdim=False)
-
+        if self.cfg.use_video_modality and not self.cfg.use_pretrained_dec:
+            # B,C,T -> B,T,C
+            encoded = encoded.permute(0, 2, 1)
+            a_encoded = self.a_linear(encoded)
+            v_encoded = self.v_linear(video_input_signal)
+        
+            # Add modality embeddings
+            B, T, C = a_encoded.size()
+            B, F, D = v_encoded.size()
+            assert C == D, "The audio and video features must have the same dimensionality"
+            
+            # Expand modality embeddings to match the dimensions of a_encoded and v_encoded
+            a_modal_emb_expanded = self.a_modal_embs.weight.expand(B, T, -1)  # Shape: (B, T, feat_in)
+            v_modal_emb_expanded = self.v_modal_embs.weight.expand(B, F, -1)  # Shape: (B, F, feat_in)
+            
+            a_encoded = a_encoded + a_modal_emb_expanded
+            v_encoded = v_encoded + v_modal_emb_expanded
+            
+            # Add positional encodings
+            a_pos_enc = self.a_pos_enc(torch.arange(T, device=a_encoded.device)).unsqueeze(0).expand(B, -1, -1)
+            v_pos_enc = self.v_pos_enc(torch.arange(F, device=v_encoded.device)).unsqueeze(0).expand(B, -1, -1)
+            
+            a_encoded = a_encoded + a_pos_enc
+            v_encoded = v_encoded + v_pos_enc
+            
+            # Concat and pass them through the transformer encoder
+            av_encoded = torch.cat((a_encoded, v_encoded), dim=1)
+            av_encoded = self.av_encoder(av_encoded)
+            
+            # remove the v_encoded tokens
+            av_encoded = av_encoded[:, :T, :]
+            
+            # B,T,C -> B,C,T
+            av_encoded = av_encoded.permute(0, 2, 1)
+            
+            # remove 
+            log_probs = self.decoder(encoder_output=av_encoded)
+            greedy_predictions = log_probs.argmax(dim=-1, keepdim=False)
+        elif (not self.cfg.use_video_modality) and (not self.cfg.use_pretrained_dec):
+            log_probs = self.decoder(encoder_output=encoded)
+            greedy_predictions = log_probs.argmax(dim=-1, keepdim=False)
+        elif (not self.cfg.use_video_modality) and self.cfg.use_pretrained_dec:
+            log_probs = self.a_model.decoder(encoder_output=encoded)
+            greedy_predictions = log_probs.argmax(dim=-1, keepdim=False)
+        elif self.cfg.use_video_modality and self.cfg.use_pretrained_dec:
+            raise ValueError("Pretrained decoder is not supported for video modality")
+        
         return (
             log_probs,
             encoded_len,
@@ -519,13 +591,13 @@ class EncDecCTCModel(ASRModel, ExportableEncDecModel, ASRModuleMixin, InterCTCMi
         if self.is_interctc_enabled():
             AccessMixin.set_access_enabled(access_enabled=True, guid=self.model_guid)
 
-        signal, signal_len, transcript, transcript_len = batch
-        if isinstance(batch, DALIOutputs) and batch.has_processed_signal:
-            log_probs, encoded_len, predictions = self.forward(
-                processed_signal=signal, processed_signal_length=signal_len
-            )
-        else:
-            log_probs, encoded_len, predictions = self.forward(input_signal=signal, input_signal_length=signal_len)
+        signal, signal_len, video_input_signal, transcript, transcript_len = batch
+        # if isinstance(batch, DALIOutputs) and batch.has_processed_signal:
+        #     log_probs, encoded_len, predictions = self.forward(
+        #         processed_signal=signal, processed_signal_length=signal_len
+        #     )
+        # else:
+        log_probs, encoded_len, predictions = self.forward(audio_input_signal=signal, audio_input_signal_length=signal_len, video_input_signal=video_input_signal)
 
         if hasattr(self, '_trainer') and self._trainer is not None:
             log_every_n_steps = self._trainer.log_every_n_steps
@@ -562,25 +634,36 @@ class EncDecCTCModel(ASRModel, ExportableEncDecModel, ASRModuleMixin, InterCTCMi
                 targets_lengths=transcript_len,
                 predictions_lengths=encoded_len,
             )
-            wer, _, _ = self.wer.compute()
+            # wer, _, _ = self.wer.compute()
+            labelled_wer, unlabelled_wer, acc, scores_unlabelled, words_unlabelled = self.wer.compute()
             self.wer.reset()
-            tensorboard_logs.update({'training_batch_wer': wer})
+            # tensorboard_logs.update({'training_batch_l_wer': labelled_wer,
+            #                          'training_batch_u_wer': unlabelled_wer,
+            #                          'training_batch_l_acc': acc,
+            #                          })
+            if labelled_wer is not None:
+                tensorboard_logs.update({'train_l_wer': labelled_wer}) 
+                self.log('train_l_wer', labelled_wer, on_step=True, on_epoch=False)
+            if unlabelled_wer is not None:
+                tensorboard_logs.update({'train_u_wer': unlabelled_wer})
+                self.log('train_u_wer', unlabelled_wer, on_step=True, on_epoch=False)
+            if acc is not None:
+                tensorboard_logs.update({'train_acc': acc})
+                self.log('train_acc', acc, on_step=True, on_epoch=False)
 
         return {'loss': loss_value, 'log': tensorboard_logs}
 
     def predict_step(self, batch, batch_idx, dataloader_idx=0):
-        signal, signal_len, transcript, transcript_len, sample_id = batch
-        if isinstance(batch, DALIOutputs) and batch.has_processed_signal:
-            log_probs, encoded_len, predictions = self.forward(
-                processed_signal=signal, processed_signal_length=signal_len
-            )
-        else:
-            log_probs, encoded_len, predictions = self.forward(input_signal=signal, input_signal_length=signal_len)
+        signal, signal_len, video_input_signal, transcript, transcript_len, sample_id = batch
+        # if isinstance(batch, DALIOutputs) and batch.has_processed_signal:
+        #     log_probs, encoded_len, predictions = self.forward(
+        #         processed_signal=signal, processed_signal_length=signal_len
+        #     )
+        # else:
+        log_probs, encoded_len, predictions = self.forward(audio_input_signal=signal, audio_input_signal_length=signal_len, video_input_signal=video_input_signal)
 
         transcribed_texts, _ = self.wer.decoding.ctc_decoder_predictions_tensor(
-            decoder_outputs=log_probs,
-            decoder_lengths=encoded_len,
-            return_hypotheses=False,
+            decoder_outputs=log_probs, decoder_lengths=encoded_len, return_hypotheses=False,
         )
 
         sample_id = sample_id.cpu().detach().numpy()
@@ -590,37 +673,38 @@ class EncDecCTCModel(ASRModel, ExportableEncDecModel, ASRModuleMixin, InterCTCMi
         if self.is_interctc_enabled():
             AccessMixin.set_access_enabled(access_enabled=True, guid=self.model_guid)
 
-        signal, signal_len, transcript, transcript_len = batch
-        if isinstance(batch, DALIOutputs) and batch.has_processed_signal:
-            log_probs, encoded_len, predictions = self.forward(
-                processed_signal=signal, processed_signal_length=signal_len
-            )
-        else:
-            log_probs, encoded_len, predictions = self.forward(input_signal=signal, input_signal_length=signal_len)
+        signal, signal_len, video_input_signal, transcript, transcript_len = batch
+        # if isinstance(batch, DALIOutputs) and batch.has_processed_signal:
+        #     log_probs, encoded_len, predictions = self.forward(
+        #         processed_signal=signal, processed_signal_length=signal_len
+        #     )
+        # else:
+        log_probs, encoded_len, predictions = self.forward(audio_input_signal=signal, audio_input_signal_length=signal_len, video_input_signal=video_input_signal)
 
         loss_value = self.loss(
             log_probs=log_probs, targets=transcript, input_lengths=encoded_len, target_lengths=transcript_len
         )
         loss_value, metrics = self.add_interctc_losses(
-            loss_value,
-            transcript,
-            transcript_len,
-            compute_wer=True,
-            log_wer_num_denom=True,
-            log_prefix="val_",
+            loss_value, transcript, transcript_len, compute_wer=True, log_wer_num_denom=True, log_prefix="val_",
         )
 
         self.wer.update(
-            predictions=log_probs,
-            targets=transcript,
-            targets_lengths=transcript_len,
-            predictions_lengths=encoded_len,
+            predictions=log_probs, targets=transcript, targets_lengths=transcript_len, predictions_lengths=encoded_len,
         )
-        wer, wer_num, wer_denom = self.wer.compute()
+        # wer, wer_num, wer_denom = self.wer.compute()
+        labelled_wer, unlabelled_wer, acc, scores_unlabelled, words_unlabelled = self.wer.compute()
         self.wer.reset()
-        metrics.update({'val_loss': loss_value, 'val_wer_num': wer_num, 'val_wer_denom': wer_denom, 'val_wer': wer})
-
-        self.log('global_step', torch.tensor(self.trainer.global_step, dtype=torch.float32))
+        metrics.update({'val_loss': loss_value, 'val_labelled_wer': labelled_wer, 'val_unlabelled_wer': unlabelled_wer, 'val_acc': acc, 'val_wer_num': scores_unlabelled, 'val_wer_denom': words_unlabelled})
+        
+        # self.log('global_step', torch.tensor(self.trainer.global_step, dtype=torch.float32))
+        if labelled_wer is not None:
+            self.log('val_l_wer', labelled_wer, on_epoch=True, sync_dist=True)
+        if unlabelled_wer is not None:
+            self.log('val_u_wer', unlabelled_wer, on_epoch=True, sync_dist=True)
+        if acc is not None:
+            self.log('val_acc', acc, on_epoch=True, sync_dist=True)
+        self.log('val_loss', loss_value, sync_dist=True)
+        
 
         # Reset access registry
         if AccessMixin.is_access_enabled(self.model_guid):
@@ -661,8 +745,22 @@ class EncDecCTCModel(ASRModel, ExportableEncDecModel, ASRModuleMixin, InterCTCMi
 
     """ Transcription related methods """
 
+    def _transcribe_on_begin(self, audio, trcfg: TranscribeConfig):
+        super()._transcribe_on_begin(audio, trcfg)
+
+        # Freeze the encoder and decoure_exder modules
+        self.encoder.freeze()
+        self.decoder.freeze()
+
+    def _transcribe_on_end(self, trcfg: TranscribeConfig):
+        super()._transcribe_on_end(trcfg)
+
+        # Unfreeze the encoder and decoder modules
+        self.encoder.unfreeze()
+        self.decoder.unfreeze()
+
     def _transcribe_forward(self, batch: Any, trcfg: TranscribeConfig):
-        logits, logits_len, greedy_predictions = self.forward(input_signal=batch[0], input_signal_length=batch[1])
+        logits, logits_len, greedy_predictions = self.forward(audio_input=batch[0], audio_input_signal_length=batch[1], video_input_signal=batch[2])
         output = dict(logits=logits, logits_len=logits_len)
         del greedy_predictions
         return output
@@ -672,9 +770,7 @@ class EncDecCTCModel(ASRModel, ExportableEncDecModel, ASRModuleMixin, InterCTCMi
         logits_len = outputs.pop('logits_len')
 
         current_hypotheses, all_hyp = self.decoding.ctc_decoder_predictions_tensor(
-            logits,
-            decoder_lengths=logits_len,
-            return_hypotheses=trcfg.return_hypotheses,
+            logits, decoder_lengths=logits_len, return_hypotheses=trcfg.return_hypotheses,
         )
         if trcfg.return_hypotheses:
             if logits.is_cuda:
@@ -688,11 +784,7 @@ class EncDecCTCModel(ASRModel, ExportableEncDecModel, ASRModuleMixin, InterCTCMi
             logits_len = logits_len.cpu()
             # dump log probs per file
             for idx in range(logits_cpu.shape[0]):
-                # We clone because we don't want references to the
-                # cudaMallocHost()-allocated tensor to be floating
-                # around. Were that to be the case, then the pinned
-                # memory cache would always miss.
-                current_hypotheses[idx].y_sequence = logits_cpu[idx, : logits_len[idx]].clone()
+                current_hypotheses[idx].y_sequence = logits_cpu[idx][: logits_len[idx]]
                 if current_hypotheses[idx].alignments is None:
                     current_hypotheses[idx].alignments = current_hypotheses[idx].y_sequence
             del logits_cpu
@@ -735,7 +827,7 @@ class EncDecCTCModel(ASRModel, ExportableEncDecModel, ASRModuleMixin, InterCTCMi
 
         dl_config = {
             'manifest_filepath': manifest_filepath,
-            'sample_rate': self.preprocessor._sample_rate,
+            'sample_rate': self.a_model.preprocessor._sample_rate,
             'labels': OmegaConf.to_container(self.decoder.vocabulary),
             'batch_size': batch_size,
             'trim_silence': False,
@@ -760,110 +852,7 @@ class EncDecCTCModel(ASRModel, ExportableEncDecModel, ASRModuleMixin, InterCTCMi
         """
         results = []
 
-        model = PretrainedModelInfo(
-            pretrained_model_name="QuartzNet15x5Base-En",
-            description="QuartzNet15x5 model trained on six datasets: LibriSpeech, Mozilla Common Voice (validated clips from en_1488h_2019-12-10), WSJ, Fisher, Switchboard, and NSC Singapore English. It was trained with Apex/Amp optimization level O1 for 600 epochs. The model achieves a WER of 3.79% on LibriSpeech dev-clean, and a WER of 10.05% on dev-other. Please visit https://ngc.nvidia.com/catalog/models/nvidia:nemospeechmodels for further details.",
-            location="https://api.ngc.nvidia.com/v2/models/nvidia/nemospeechmodels/versions/1.0.0a5/files/QuartzNet15x5Base-En.nemo",
-        )
-        results.append(model)
-
-        model = PretrainedModelInfo(
-            pretrained_model_name="stt_en_quartznet15x5",
-            description="For details about this model, please visit https://ngc.nvidia.com/catalog/models/nvidia:nemo:stt_en_quartznet15x5",
-            location="https://api.ngc.nvidia.com/v2/models/nvidia/nemo/stt_en_quartznet15x5/versions/1.0.0rc1/files/stt_en_quartznet15x5.nemo",
-        )
-        results.append(model)
-
-        model = PretrainedModelInfo(
-            pretrained_model_name="stt_en_jasper10x5dr",
-            description="For details about this model, please visit https://ngc.nvidia.com/catalog/models/nvidia:nemo:stt_en_jasper10x5dr",
-            location="https://api.ngc.nvidia.com/v2/models/nvidia/nemo/stt_en_jasper10x5dr/versions/1.0.0rc1/files/stt_en_jasper10x5dr.nemo",
-        )
-        results.append(model)
-
-        model = PretrainedModelInfo(
-            pretrained_model_name="stt_ca_quartznet15x5",
-            description="For details about this model, please visit https://ngc.nvidia.com/catalog/models/nvidia:nemo:stt_ca_quartznet15x5",
-            location="https://api.ngc.nvidia.com/v2/models/nvidia/nemo/stt_ca_quartznet15x5/versions/1.0.0rc1/files/stt_ca_quartznet15x5.nemo",
-        )
-        results.append(model)
-
-        model = PretrainedModelInfo(
-            pretrained_model_name="stt_it_quartznet15x5",
-            description="For details about this model, please visit https://ngc.nvidia.com/catalog/models/nvidia:nemo:stt_it_quartznet15x5",
-            location="https://api.ngc.nvidia.com/v2/models/nvidia/nemo/stt_it_quartznet15x5/versions/1.0.0rc1/files/stt_it_quartznet15x5.nemo",
-        )
-        results.append(model)
-
-        model = PretrainedModelInfo(
-            pretrained_model_name="stt_fr_quartznet15x5",
-            description="For details about this model, please visit https://ngc.nvidia.com/catalog/models/nvidia:nemo:stt_fr_quartznet15x5",
-            location="https://api.ngc.nvidia.com/v2/models/nvidia/nemo/stt_fr_quartznet15x5/versions/1.0.0rc1/files/stt_fr_quartznet15x5.nemo",
-        )
-        results.append(model)
-
-        model = PretrainedModelInfo(
-            pretrained_model_name="stt_es_quartznet15x5",
-            description="For details about this model, please visit https://ngc.nvidia.com/catalog/models/nvidia:nemo:stt_es_quartznet15x5",
-            location="https://api.ngc.nvidia.com/v2/models/nvidia/nemo/stt_es_quartznet15x5/versions/1.0.0rc1/files/stt_es_quartznet15x5.nemo",
-        )
-        results.append(model)
-
-        model = PretrainedModelInfo(
-            pretrained_model_name="stt_de_quartznet15x5",
-            description="For details about this model, please visit https://ngc.nvidia.com/catalog/models/nvidia:nemo:stt_de_quartznet15x5",
-            location="https://api.ngc.nvidia.com/v2/models/nvidia/nemo/stt_de_quartznet15x5/versions/1.0.0rc1/files/stt_de_quartznet15x5.nemo",
-        )
-        results.append(model)
-
-        model = PretrainedModelInfo(
-            pretrained_model_name="stt_pl_quartznet15x5",
-            description="For details about this model, please visit https://ngc.nvidia.com/catalog/models/nvidia:nemo:stt_pl_quartznet15x5",
-            location="https://api.ngc.nvidia.com/v2/models/nvidia/nemo/stt_pl_quartznet15x5/versions/1.0.0rc1/files/stt_pl_quartznet15x5.nemo",
-        )
-        results.append(model)
-
-        model = PretrainedModelInfo(
-            pretrained_model_name="stt_ru_quartznet15x5",
-            description="For details about this model, please visit https://ngc.nvidia.com/catalog/models/nvidia:nemo:stt_ru_quartznet15x5",
-            location="https://api.ngc.nvidia.com/v2/models/nvidia/nemo/stt_ru_quartznet15x5/versions/1.0.0rc1/files/stt_ru_quartznet15x5.nemo",
-        )
-        results.append(model)
-
-        model = PretrainedModelInfo(
-            pretrained_model_name="stt_zh_citrinet_512",
-            description="For details about this model, please visit https://ngc.nvidia.com/catalog/models/nvidia:nemo:stt_zh_citrinet_512",
-            location="https://api.ngc.nvidia.com/v2/models/nvidia/nemo/stt_zh_citrinet_512/versions/1.0.0rc1/files/stt_zh_citrinet_512.nemo",
-        )
-        results.append(model)
-
-        model = PretrainedModelInfo(
-            pretrained_model_name="stt_zh_citrinet_1024_gamma_0_25",
-            description="For details about this model, please visit https://ngc.nvidia.com/catalog/models/nvidia:nemo:stt_zh_citrinet_1024_gamma_0_25",
-            location="https://api.ngc.nvidia.com/v2/models/nvidia/nemo/stt_zh_citrinet_1024_gamma_0_25/versions/1.0.0/files/stt_zh_citrinet_1024_gamma_0_25.nemo",
-        )
-
-        results.append(model)
-
-        model = PretrainedModelInfo(
-            pretrained_model_name="stt_zh_citrinet_1024_gamma_0_25",
-            description="For details about this model, please visit https://ngc.nvidia.com/catalog/models/nvidia:nemo:stt_zh_citrinet_1024_gamma_0_25",
-            location="https://api.ngc.nvidia.com/v2/models/nvidia/nemo/stt_zh_citrinet_1024_gamma_0_25/versions/1.0.0/files/stt_zh_citrinet_1024_gamma_0_25.nemo",
-        )
-        results.append(model)
-
-        model = PretrainedModelInfo(
-            pretrained_model_name="asr_talknet_aligner",
-            description="For details about this model, please visit https://ngc.nvidia.com/catalog/models/nvidia:nemo:asr_talknet_aligner",
-            location="https://api.ngc.nvidia.com/v2/models/nvidia/nemo/asr_talknet_aligner/versions/1.0.0rc1/files/qn5x5_libri_tts_phonemes.nemo",
-        )
-        results.append(model)
-
         return results
-
-    @property
-    def adapter_module_names(self) -> List[str]:
-        return ['', 'encoder', 'decoder']
 
     @property
     def wer(self):

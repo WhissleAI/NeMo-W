@@ -188,6 +188,165 @@ def __parse_item(line: str, manifest_file: str) -> Dict[str, Any]:
     return item
 
 
+def av_item_iter(
+    manifests_files: Union[str, List[str]], parse_func: Callable[[str, Optional[str]], Dict[str, Any]] = None
+) -> Iterator[Dict[str, Any]]:
+    """Iterate through json lines of provided manifests.
+
+    NeMo ASR pipelines often assume certain manifest files structure. In
+    particular, each manifest file should consist of line-per-sample files with
+    each line being correct json dict. Each such json dict should have a field
+    for audio file string, a field for duration float and a field for text
+    string. Offset also could be additional field and is set to None by
+    default.
+
+    Args:
+        manifests_files: Either single string file or list of such -
+            manifests to yield items from.
+
+        parse_func: A callable function which accepts as input a single line
+            of a manifest and optionally the manifest file itself,
+            and parses it, returning a dictionary mapping from str -> Any.
+
+    Yields:
+        Parsed key to value item dicts.
+
+    Raises:
+        ValueError: If met invalid json line structure.
+    """
+
+    if isinstance(manifests_files, str):
+        manifests_files = [manifests_files]
+
+    if parse_func is None:
+        parse_func = __av_parse_item
+
+    errors = defaultdict(list)
+    k = -1
+    logging.debug('Manifest files: %s', str(manifests_files))
+    for manifest_file in manifests_files:
+        logging.debug('Using manifest file: %s', str(manifest_file))
+        cached_manifest_file = DataStoreObject(manifest_file).get()
+        logging.debug('Cached at: %s', str(cached_manifest_file))
+        with open(expanduser(cached_manifest_file), 'r') as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                k += 1
+                try:
+                    item = parse_func(line, manifest_file)
+                except json.JSONDecodeError:
+                    errors[str(manifest_file)].append(line)
+                    continue
+                item['id'] = k
+
+                yield item
+
+    if len(errors) > 0:
+        for filename, lines in errors.items():
+            logging.error("=============================================")
+            logging.error(f"Failed to parse {len(lines)} lines from manifest file: {filename}")
+            for line in lines:
+                logging.error(f"-- Failed to parse line: `{line}`")
+        raise RuntimeError("Failed to parse some lines from manifest files. See logs for more details.")
+
+
+def __av_parse_item(line: str, manifest_file: str) -> Dict[str, Any]:
+    item = json.loads(line)
+
+    # Audio file
+    if 'audio_filename' in item:
+        item['audio_file'] = item.pop('audio_filename')
+    elif 'audio_filepath' in item:
+        item['audio_file'] = item.pop('audio_filepath')
+
+    # Video File
+    if 'video_filename' in item:
+        item['video_file'] = item.pop('video_filename')
+    elif 'video_filepath' in item:
+        item['video_file'] = item.pop('video_filepath')
+
+    if 'video_file' not in item and 'audio_file' not in item:
+        raise ValueError(
+            f"Manifest file {manifest_file} has invalid json line structure: {line} without proper audio/video file key."
+        )
+
+    # If the audio/video path is a relative path and does not exist,
+    # try to attach the parent directory of manifest to the audio path.
+    # Revert to the original path if the new path still doesn't exist.
+    # Assume that the audio path is like "wavs/xxxxxx.wav".
+    if 'audio_file' in item:
+        item['audio_file'] = get_full_path(audio_file=item['audio_file'], manifest_file=manifest_file)
+    if 'video_file' in item:
+        item['video_file'] = get_full_path(audio_file=item['video_file'], manifest_file=manifest_file)
+
+    # Duration.
+    if 'duration' not in item:
+        raise ValueError(
+            f"Manifest file {manifest_file} has invalid json line structure: {line} without proper duration key."
+        )
+
+    # Text.
+    if 'text' in item:
+        pass
+    elif 'text_filepath' in item:
+        with open(item.pop('text_filepath'), 'r') as f:
+            item['text'] = f.read().replace('\n', '')
+    elif 'normalized_text' in item:
+        item['text'] = item['normalized_text']
+    else:
+        item['text'] = ""
+
+    # Optional RTTM file
+    if 'rttm_file' in item:
+        pass
+    elif 'rttm_filename' in item:
+        item['rttm_file'] = item.pop('rttm_filename')
+    elif 'rttm_filepath' in item:
+        item['rttm_file'] = item.pop('rttm_filepath')
+    else:
+        item['rttm_file'] = None
+    if item['rttm_file'] is not None:
+        item['rttm_file'] = get_full_path(audio_file=item['rttm_file'], manifest_file=manifest_file)
+
+    # Optional audio feature file
+    if 'feature_file' in item:
+        pass
+    elif 'feature_filename' in item:
+        item['feature_file'] = item.pop('feature_filename')
+    elif 'feature_filepath' in item:
+        item['feature_file'] = item.pop('feature_filepath')
+    else:
+        item['feature_file'] = None
+    if item['feature_file'] is not None:
+        item['feature_file'] = get_full_path(audio_file=item['feature_file'], manifest_file=manifest_file)
+
+    # Optional snr_ratio 
+    if 'snr' in item:
+        pass
+    elif 'snr_ratio' in item:
+        item['snr'] = item.pop('snr_ratio')
+    else:
+        item['snr'] = None
+        
+    item = dict(
+        audio_file=item.get('audio_file', None),
+        video_file=item.get('video_file', None),
+        duration=item['duration'],
+        text=item['text'],
+        rttm_file=item['rttm_file'],
+        feature_file=item['feature_file'],
+        offset=item.get('offset', None),
+        speaker=item.get('speaker', None),
+        orig_sr=item.get('orig_sample_rate', None),
+        token_labels=item.get('token_labels', None),
+        lang=item.get('lang', None),
+        snr_ratio=item.get('snr', None),
+    )
+    return item
+
+
 def is_tarred_dataset(audio_file: str, manifest_file: Optional[str] = None) -> bool:
     if "/" in audio_file or manifest_file is None:
         # audio files in a tarred dataset don't have `/` in their paths

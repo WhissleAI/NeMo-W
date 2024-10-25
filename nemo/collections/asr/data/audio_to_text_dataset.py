@@ -25,6 +25,7 @@ from pytorch_lightning.callbacks import BasePredictionWriter
 from torch.utils.data import ChainDataset
 
 from nemo.collections.asr.data import audio_to_text, audio_to_text_dali
+from nemo.collections.asr.data import av_to_text
 from nemo.collections.asr.data.huggingface.hf_audio_to_text_dataset import (
     get_hf_audio_to_text_bpe_dataset,
     get_hf_audio_to_text_char_dataset,
@@ -704,6 +705,69 @@ def get_audio_to_text_char_dataset_from_config(
             dataset = get_char_dataset(config=config, augmentor=augmentor)
     return dataset
 
+def get_av_char_dataset(config: dict, augmentor: Optional['AudioAugmentor'] = None) -> av_to_text.AVToCharDataset:
+    """
+    Instantiates a Character Encoding based AVToCharDataset.
+
+    Args:
+        config: Config of the AVToCharDataset.
+        augmentor: Optional AudioAugmentor object for augmentations on audio data.
+
+    Returns:
+        An instance of AV.
+    """
+    if 'labels' not in config:
+        logging.warning(f"dataset does not have explicitly defined labels")
+    
+    dataset = av_to_text.AVToCharDataset(
+        manifest_filepath=config['manifest_filepath'],
+        labels=config.get('labels', None),
+        sample_rate=config['sample_rate'],
+        int_values=config.get('int_values', False),
+        augmentor=augmentor,
+        max_duration=config.get('max_duration', None),
+        min_duration=config.get('min_duration', None),
+        max_utts=config.get('max_utts', 0),
+        blank_index=config.get('blank_index', -1),
+        unk_index=config.get('unk_index', -1),
+        normalize=config.get('normalize_transcripts', False),
+        trim=config.get('trim_silence', False),
+        parser=config.get('parser', 'en'),
+        return_sample_id=config.get('return_sample_id', False),
+        channel_selector=config.get('channel_selector', None),
+        video_frame_rate=config.get('video_frame_rate', 3),
+        get_vid_feats=config.get('get_vid_feats', False),
+        get_zero_vid_feats = config.get('get_zero_vid_feats', False),
+    )
+    return dataset
+    
+def get_av_to_text_char_dataset_from_config(
+    config, local_rank: int, global_rank: int, world_size: int, preprocessor_cfg: Optional[DictConfig] = None
+):
+    """
+    Construct AV-To-Text Char dataset from a config.
+    Args:
+        config: dataset config
+        local_rank: model local rank
+        global_rank: model global rand
+        world_size: world size
+        preprocessor_cfg: preprocessor config, for DALI dataset
+
+    Returns:
+        constructed dataset or None if dataset config is invalid or nothing to load
+    """
+    
+    if 'augmentor' in config:
+        augmentor = process_augmentations(config['augmentor'], global_rank=global_rank, world_size=world_size)
+    else:
+        augmentor = None
+
+    if 'manifest_filepath' in config and config['manifest_filepath'] is None:
+        logging.warning(f"Could not load dataset as `manifest_filepath` was None. Provided config : {config}")
+        return None
+    dataset = get_av_char_dataset(config=config, augmentor=augmentor)
+    return dataset
+    
 
 def get_audio_to_text_bpe_dataset_from_config(
     config,
@@ -839,6 +903,72 @@ def get_audio_to_text_bpe_dataset_from_config(
             )
         else:
             dataset = get_bpe_dataset(config=config, tokenizer=tokenizer, augmentor=augmentor)
+    return dataset
+
+def get_av_bpe_dataset(
+    config: dict, tokenizer: 'TokenizerSpec', augmentor: Optional['AudioAugmentor'] = None
+) -> av_to_text.AVToBPEDataset:
+    """
+    Instantiates a Byte Pair Encoding / Word Piece Encoding based AudioToBPEDataset.
+
+    Args:
+        config: Config of the AVToBPEDataset.
+        tokenizer: An instance of a TokenizerSpec object.
+        augmentor: Optional AudioAugmentor object for augmentations on audio data.
+
+    Returns:
+        An instance of AVToBPEDataset.
+    """
+    dataset = av_to_text.AVToBPEDataset(
+        manifest_filepath=config['manifest_filepath'],
+        tokenizer=tokenizer,
+        sample_rate=config['sample_rate'],
+        int_values=config.get('int_values', False),
+        augmentor=augmentor,
+        max_duration=config.get('max_duration', None),
+        min_duration=config.get('min_duration', None),
+        max_utts=config.get('max_utts', 0),
+        trim=config.get('trim_silence', False),
+        use_start_end_token=config.get('use_start_end_token', True),
+        return_sample_id=config.get('return_sample_id', False),
+        channel_selector=config.get('channel_selector', None),
+        video_frame_rate=config.get('video_frame_rate', 3),
+        get_vid_feats=config.get('get_vid_feats', False),
+        get_zero_vid_feats = config.get('get_zero_vid_feats', False),
+        override_snr_ratio = config.get('override_snr_ratio', None),
+    )
+    return dataset
+
+def get_av_to_text_bpe_dataset_from_config(
+    config,
+    local_rank: int,
+    global_rank: int,
+    world_size: int,
+    tokenizer,
+    preprocessor_cfg: Optional[DictConfig] = None,
+):
+    """
+    Construct AV-To-Text BPE dataset from a config.
+    Args:
+        config: BPE dataset config
+        local_rank: model local rank
+        global_rank: model global rand
+        world_size: world size
+        tokenizer: BPE tokenizer
+        preprocessor_cfg: preprocessor config, for DALI BPE dataset
+
+    Returns:
+        constructed dataset or None if dataset config is invalid or nothing to load
+    """
+    if 'augmentor' in config:
+        augmentor = process_augmentations(config['augmentor'], global_rank=global_rank, world_size=world_size)
+    else:
+        augmentor = None
+
+    if 'manifest_filepath' in config and config['manifest_filepath'] is None:
+        logging.warning(f"Could not load dataset as `manifest_filepath` was None. Provided config : {config}")
+        return None
+    dataset = get_av_bpe_dataset(config=config, tokenizer=tokenizer, augmentor=augmentor)
     return dataset
 
 

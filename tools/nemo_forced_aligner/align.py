@@ -148,7 +148,7 @@ class AlignmentConfig:
     simulate_cache_aware_streaming: Optional[bool] = False
 
     # Output file configs
-    save_output_file_formats: List[str] = field(default_factory=lambda: ["ctm", "ass"])
+    save_output_file_formats: List[str] = field(default_factory=lambda: ["ctm"])
     ctm_file_config: CTMFileConfig = field(default_factory=lambda: CTMFileConfig())
     ass_file_config: ASSFileConfig = field(default_factory=lambda: ASSFileConfig())
 

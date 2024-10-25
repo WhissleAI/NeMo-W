@@ -164,7 +164,8 @@ class AudioText(_Collection):
                         # elif hasattr(parser, "lang") and parser.lang is not None:
                         #    text_tokens = parser(text, parser.lang)
                         else:
-                            raise ValueError("lang required in manifest when using aggregate tokenizers")
+                            raise ValueError(
+                                "lang required in manifest when using aggregate tokenizers")
                     else:
                         text_tokens = parser(text)
                 else:
@@ -177,7 +178,8 @@ class AudioText(_Collection):
 
             total_duration += duration
 
-            data.append(output_type(id_, audio_file, duration, text_tokens, offset, text, speaker, orig_sr, lang))
+            data.append(output_type(id_, audio_file, duration,
+                        text_tokens, offset, text, speaker, orig_sr, lang))
             if index_by_file_id:
                 file_id, _ = os.path.splitext(os.path.basename(audio_file))
                 if file_id not in self.mapping:
@@ -190,12 +192,137 @@ class AudioText(_Collection):
 
         if do_sort_by_duration:
             if index_by_file_id:
-                logging.warning("Tried to sort dataset by duration, but cannot since index_by_file_id is set.")
+                logging.warning(
+                    "Tried to sort dataset by duration, but cannot since index_by_file_id is set.")
             else:
                 data.sort(key=lambda entity: entity.duration)
 
-        logging.info("Dataset loaded with %d files totalling %.2f hours", len(data), total_duration / 3600)
-        logging.info("%d files were filtered totalling %.2f hours", num_filtered, duration_filtered / 3600)
+        logging.info("Dataset loaded with %d files totalling %.2f hours", len(
+            data), total_duration / 3600)
+        logging.info("%d files were filtered totalling %.2f hours",
+                     num_filtered, duration_filtered / 3600)
+
+        super().__init__(data)
+
+
+class AVText(_Collection):
+    """List of audio-transcript text correspondence with preprocessing."""
+
+    AV_OUTPUT_TYPE = collections.namedtuple(
+        typename='AVTextEntity',
+        field_names='id audio_file video_file video_featfile duration text_tokens snr offset text_raw speaker orig_sr lang',
+    )
+
+    def __init__(
+        self,
+        ids: List[int],
+        audio_files: List[str],
+        video_files: List[str],
+        video_featfiles: List[str],
+        durations: List[float],
+        snr_ratios: List[float],
+        texts: List[str],
+        offsets: List[str],
+        speakers: List[Optional[int]],
+        orig_sampling_rates: List[Optional[int]],
+        token_labels: List[Optional[int]],
+        langs: List[Optional[str]],
+        parser: parsers.CharParser,
+        min_duration: Optional[float] = None,
+        max_duration: Optional[float] = None,
+        max_number: Optional[int] = None,
+        do_sort_by_duration: bool = False,
+        index_by_file_id: bool = False,
+    ):
+        """Instantiates audio-text manifest with filters and preprocessing.
+
+        Args:
+            ids: List of examples positions.
+            audio_files: List of audio files.
+            video_files: List of video files.
+            video_featfiles: List of video feature files.
+            durations: List of float durations.
+            texts: List of raw text transcripts.
+            snr_ratios: List of signal-to-noise ratios.
+            offsets: List of duration offsets or None.
+            speakers: List of optional speakers ids.
+            orig_sampling_rates: List of original sampling rates of audio files.
+            langs: List of language ids, one for eadh sample, or None.
+            parser: Instance of `CharParser` to convert string to tokens.
+            min_duration: Minimum duration to keep entry with (default: None).
+            max_duration: Maximum duration to keep entry with (default: None).
+            max_number: Maximum number of samples to collect.
+            do_sort_by_duration: True if sort samples list by duration. Not compatible with index_by_file_id.
+            index_by_file_id: If True, saves a mapping from filename base (ID) to index in data.
+        """
+
+        output_type = self.AV_OUTPUT_TYPE
+        data, duration_filtered, num_filtered, total_duration = [], 0.0, 0, 0.0
+        if index_by_file_id:
+            self.mapping = {}
+
+        for id_, audio_file, video_file, video_featfile, duration, offset, text, snr_ratio, speaker, orig_sr, token_labels, lang in zip(
+            ids, audio_files, video_files, video_featfiles, durations, offsets, texts, snr_ratios, speakers, orig_sampling_rates, token_labels, langs
+        ):
+            # Duration filters.
+            if min_duration is not None and duration < min_duration:
+                duration_filtered += duration
+                num_filtered += 1
+                continue
+
+            if max_duration is not None and duration > max_duration:
+                duration_filtered += duration
+                num_filtered += 1
+                continue
+
+            if token_labels is not None:
+                text_tokens = token_labels
+            else:
+                if text != '':
+                    if hasattr(parser, "is_aggregate") and parser.is_aggregate and isinstance(text, str):
+                        if lang is not None:
+                            text_tokens = parser(text, lang)
+                        # for future use if want to add language bypass to audio_to_text classes
+                        # elif hasattr(parser, "lang") and parser.lang is not None:
+                        #    text_tokens = parser(text, parser.lang)
+                        else:
+                            raise ValueError(
+                                "lang required in manifest when using aggregate tokenizers")
+                    else:
+                        text_tokens = parser(text)
+                else:
+                    text_tokens = []
+
+                if text_tokens is None:
+                    duration_filtered += duration
+                    num_filtered += 1
+                    continue
+
+            total_duration += duration
+
+            data.append(output_type(id_, audio_file, video_file, video_featfile, duration,
+                        text_tokens, snr_ratio, offset, text, speaker, orig_sr, lang))
+            if index_by_file_id:
+                file_id, _ = os.path.splitext(os.path.basename(audio_file))
+                if file_id not in self.mapping:
+                    self.mapping[file_id] = []
+                self.mapping[file_id].append(len(data) - 1)
+
+            # Max number of entities filter.
+            if len(data) == max_number:
+                break
+
+        if do_sort_by_duration:
+            if index_by_file_id:
+                logging.warning(
+                    "Tried to sort dataset by duration, but cannot since index_by_file_id is set.")
+            else:
+                data.sort(key=lambda entity: entity.duration)
+
+        logging.info("Dataset loaded with %d files totalling %.2f hours", len(
+            data), total_duration / 3600)
+        logging.info("%d files were filtered totalling %.2f hours",
+                     num_filtered, duration_filtered / 3600)
 
         super().__init__(data)
 
@@ -272,7 +399,8 @@ class VideoText(_Collection):
                         if lang is not None:
                             text_tokens = parser(text, lang)
                         else:
-                            raise ValueError("lang required in manifest when using aggregate tokenizers")
+                            raise ValueError(
+                                "lang required in manifest when using aggregate tokenizers")
                     else:
                         text_tokens = parser(text)
                 else:
@@ -285,7 +413,8 @@ class VideoText(_Collection):
 
             total_duration += duration
 
-            data.append(output_type(id_, video_file, duration, text_tokens, offset, text, speaker, orig_sr, lang))
+            data.append(output_type(id_, video_file, duration,
+                        text_tokens, offset, text, speaker, orig_sr, lang))
             if index_by_file_id:
                 file_id, _ = os.path.splitext(os.path.basename(video_file))
                 if file_id not in self.mapping:
@@ -298,12 +427,15 @@ class VideoText(_Collection):
 
         if do_sort_by_duration:
             if index_by_file_id:
-                logging.warning("Tried to sort dataset by duration, but cannot since index_by_file_id is set.")
+                logging.warning(
+                    "Tried to sort dataset by duration, but cannot since index_by_file_id is set.")
             else:
                 data.sort(key=lambda entity: entity.duration)
 
-        logging.info("Dataset loaded with %d files totalling %.2f hours", len(data), total_duration / 3600)
-        logging.info("%d files were filtered totalling %.2f hours", num_filtered, duration_filtered / 3600)
+        logging.info("Dataset loaded with %d files totalling %.2f hours", len(
+            data), total_duration / 3600)
+        logging.info("%d files were filtered totalling %.2f hours",
+                     num_filtered, duration_filtered / 3600)
 
         super().__init__(data)
 
@@ -350,6 +482,48 @@ class ASRAudioText(AudioText):
             ids, audio_files, durations, texts, offsets, speakers, orig_srs, token_labels, langs, *args, **kwargs
         )
 
+
+
+class ASR_AV_AudioText(AVText):
+    """`AudioText` collector from asr structured json files."""
+
+    def __init__(self, manifests_files: Union[str, List[str]], *args, **kwargs):
+        """Parse lists of audio files, durations and transcripts texts.
+
+        Args:
+            manifests_files: Either single string file or list of such -
+                manifests to yield items from.
+            *args: Args to pass to `AVText` constructor.
+            **kwargs: Kwargs to pass to `AVText` constructor.
+        """
+
+        ids, audio_files, video_files, durations, texts, offsets, video_featfiles, snr_ratios = (
+            [],
+            [],
+            [],
+            [],
+            [],
+            [],
+            [],
+            [],
+        )
+        speakers, orig_srs, token_labels, langs = [], [], [], []
+        for item in manifest.av_item_iter(manifests_files):
+            ids.append(item['id'])
+            audio_files.append(item['audio_file'])
+            video_featfiles.append(item['feature_file'])
+            durations.append(item['duration'])
+            texts.append(item['text'])
+            video_files.append(item['video_file'])
+            snr_ratios.append(item['snr_ratio'])
+            offsets.append(item['offset'])
+            speakers.append(item['speaker'])
+            orig_srs.append(item['orig_sr'])
+            token_labels.append(item['token_labels'])
+            langs.append(item['lang'])
+        super().__init__(
+            ids, audio_files, video_files, video_featfiles, durations, snr_ratios, texts, offsets, speakers, orig_srs, token_labels, langs, *args, **kwargs
+        )
 
 class SpeechLLMAudioTextEntity(object):
     def __init__(self, sid, audio_file, duration, context, answer, offset, speaker, orig_sr, lang) -> None:
@@ -669,7 +843,7 @@ class SpeechLabel(_Collection):
     """List of audio-label correspondence with preprocessing."""
 
     OUTPUT_TYPE = collections.namedtuple(
-        typename='SpeechLabelEntity',
+      typename='SpeechLabelEntity',
         field_names='audio_file duration label offset',
     )
 
@@ -732,9 +906,11 @@ class SpeechLabel(_Collection):
 
         if do_sort_by_duration:
             if index_by_file_id:
-                logging.warning("Tried to sort dataset by duration, but cannot since index_by_file_id is set.")
+                logging.warning(
+                    "Tried to sort dataset by duration, but cannot since index_by_file_id is set.")
             else:
                 data.sort(key=lambda entity: entity.duration)
+
 
         if duration_undefined:
             logging.info(f"Dataset loaded with {len(data)} items. The durations were not provided.")
@@ -744,8 +920,10 @@ class SpeechLabel(_Collection):
                 f"Dataset successfully loaded with {len(data)} items and total duration provided from manifest is {total_duration / 3600: .2f} hours."
             )
 
+
         self.uniq_labels = sorted(set(map(lambda x: x.label, data)))
-        logging.info("# {} files loaded accounting to # {} labels".format(len(data), len(self.uniq_labels)))
+        logging.info("# {} files loaded accounting to # {} labels".format(
+            len(data), len(self.uniq_labels)))
 
         super().__init__(data)
 
@@ -802,12 +980,15 @@ class ASRSpeechLabel(SpeechLabel):
         elif 'audio_filepath' in item:
             item['audio_file'] = item.pop('audio_filepath')
         else:
-            raise ValueError(f"Manifest file has invalid json line structure: {line} without proper audio file key.")
-        item['audio_file'] = manifest.get_full_path(audio_file=item['audio_file'], manifest_file=manifest_file)
+            raise ValueError(
+                f"Manifest file has invalid json line structure: {line} without proper audio file key.")
+        item['audio_file'] = manifest.get_full_path(
+            audio_file=item['audio_file'], manifest_file=manifest_file)
 
         # Duration.
         if 'duration' not in item:
-            raise ValueError(f"Manifest file has invalid json line structure: {line} without proper duration key.")
+            raise ValueError(
+                f"Manifest file has invalid json line structure: {line} without proper duration key.")
 
         # Label.
         if 'command' in item:
@@ -817,7 +998,8 @@ class ASRSpeechLabel(SpeechLabel):
         elif 'label' in item:
             pass
         else:
-            raise ValueError(f"Manifest file has invalid json line structure: {line} without proper label key.")
+            raise ValueError(
+                f"Manifest file has invalid json line structure: {line} without proper label key.")
 
         item = dict(
             audio_file=item['audio_file'],
@@ -836,6 +1018,7 @@ class FeatureSequenceLabel(_Collection):
         typename='FeatureSequenceLabelEntity',
         field_names='feature_file seq_label',
     )
+
 
     def __init__(
         self,
@@ -865,7 +1048,8 @@ class FeatureSequenceLabel(_Collection):
 
         for feature_file, seq_label in zip(feature_files, seq_labels):
 
-            label_tokens, uniq_labels_in_seq = self.relative_speaker_parser(seq_label)
+            label_tokens, uniq_labels_in_seq = self.relative_speaker_parser(
+                seq_label)
 
             data.append(output_type(feature_file, label_tokens))
             self.uniq_labels |= uniq_labels_in_seq
@@ -882,7 +1066,8 @@ class FeatureSequenceLabel(_Collection):
             if len(data) == max_number:
                 break
 
-        logging.info("# {} files loaded including # {} unique labels".format(len(data), len(self.uniq_labels)))
+        logging.info("# {} files loaded including # {} unique labels".format(
+            len(data), len(self.uniq_labels)))
         super().__init__(data)
 
     def relative_speaker_parser(self, seq_label):
@@ -1062,7 +1247,8 @@ class DiarizationLabel(_Collection):
 
         if do_sort_by_duration:
             if index_by_file_id:
-                logging.warning("Tried to sort dataset by duration, but cannot since index_by_file_id is set.")
+                logging.warning(
+                    "Tried to sort dataset by duration, but cannot since index_by_file_id is set.")
             else:
                 data.sort(key=lambda entity: entity.duration)
 
@@ -1070,7 +1256,8 @@ class DiarizationLabel(_Collection):
             "Filtered duration for loading collection is %f.",
             duration_filtered,
         )
-        logging.info(f"Total {len(data)} session files loaded accounting to # {len(audio_files)} audio clips")
+        logging.info(
+            f"Total {len(data)} session files loaded accounting to # {len(audio_files)} audio clips")
 
         super().__init__(data)
 
@@ -1130,12 +1317,15 @@ class DiarizationSpeechLabel(DiarizationLabel):
         for item in manifest.item_iter(manifests_files, parse_func=self.__parse_item_rttm):
             # Inference mode
             if self.pairwise_infer:
-                clus_speaker_digits = sorted(list(set([x[2] for x in clus_label_dict[item['uniq_id']]])))
+                clus_speaker_digits = sorted(
+                    list(set([x[2] for x in clus_label_dict[item['uniq_id']]])))
                 if item['rttm_file']:
                     base_scale_index = max(self.emb_dict.keys())
                     _sess_spk_dict = self.emb_dict[base_scale_index][item['uniq_id']]['mapping']
-                    sess_spk_dict = {int(v.split('_')[-1]): k for k, v in _sess_spk_dict.items()}
-                    rttm_speaker_digits = [int(v.split('_')[1]) for k, v in _sess_spk_dict.items()]
+                    sess_spk_dict = {
+                        int(v.split('_')[-1]): k for k, v in _sess_spk_dict.items()}
+                    rttm_speaker_digits = [int(v.split('_')[1])
+                                           for k, v in _sess_spk_dict.items()]
                     if self.seq_eval_mode:
                         clus_speaker_digits = rttm_speaker_digits
                 else:
@@ -1147,14 +1337,17 @@ class DiarizationSpeechLabel(DiarizationLabel):
                 rttm_labels = []
                 with open(item['rttm_file'], 'r') as f:
                     for line in f.readlines():
-                        start, end, speaker = self.split_rttm_line(line, decimals=3)
-                        rttm_labels.append('{} {} {}'.format(start, end, speaker))
+                        start, end, speaker = self.split_rttm_line(
+                            line, decimals=3)
+                        rttm_labels.append(
+                            '{} {} {}'.format(start, end, speaker))
                 speaker_set = set()
                 for rttm_line in rttm_labels:
                     spk_str = rttm_line.split()[-1]
                     speaker_set.add(spk_str)
                 speaker_list = sorted(list(speaker_set))
-                sess_spk_dict = {key: val for key, val in enumerate(speaker_list)}
+                sess_spk_dict = {key: val for key,
+                                 val in enumerate(speaker_list)}
                 target_spks = tuple(sess_spk_dict.keys())
                 clus_speaker_digits = target_spks
                 rttm_speaker_digits = target_spks
@@ -1162,7 +1355,8 @@ class DiarizationSpeechLabel(DiarizationLabel):
             if len(clus_speaker_digits) <= 2:
                 spk_comb_list = [(0, 1)]
             else:
-                spk_comb_list = [x for x in combinations(clus_speaker_digits, 2)]
+                spk_comb_list = [x for x in combinations(
+                    clus_speaker_digits, 2)]
 
             for target_spks in spk_comb_list:
                 audio_files.append(item['audio_file'])
@@ -1232,9 +1426,11 @@ class DiarizationSpeechLabel(DiarizationLabel):
                 f"Manifest file has invalid json line " f"structure: {line} without proper audio file key."
             )
         item['audio_file'] = os.path.expanduser(item['audio_file'])
-        item['uniq_id'] = os.path.splitext(os.path.basename(item['audio_file']))[0]
+        item['uniq_id'] = os.path.splitext(
+            os.path.basename(item['audio_file']))[0]
         if 'duration' not in item:
-            raise ValueError(f"Manifest file has invalid json line " f"structure: {line} without proper duration key.")
+            raise ValueError(
+                f"Manifest file has invalid json line " f"structure: {line} without proper duration key.")
         item = dict(
             audio_file=item['audio_file'],
             uniq_id=item['uniq_id'],
@@ -1248,7 +1444,8 @@ class DiarizationSpeechLabel(DiarizationLabel):
 class Audio(_Collection):
     """Prepare a list of all audio items, filtered by duration."""
 
-    OUTPUT_TYPE = collections.namedtuple(typename='Audio', field_names='audio_files duration offset text')
+    OUTPUT_TYPE = collections.namedtuple(
+        typename='Audio', field_names='audio_files duration offset text')
 
     def __init__(
         self,
@@ -1300,8 +1497,10 @@ class Audio(_Collection):
         if do_sort_by_duration:
             data.sort(key=lambda entity: entity.duration)
 
-        logging.info("Dataset loaded with %d files totalling %.2f hours", len(data), total_duration / 3600)
-        logging.info("%d files were filtered totalling %.2f hours", num_filtered, duration_filtered / 3600)
+        logging.info("Dataset loaded with %d files totalling %.2f hours", len(
+            data), total_duration / 3600)
+        logging.info("%d files were filtered totalling %.2f hours",
+                     num_filtered, duration_filtered / 3600)
 
         super().__init__(data)
 
@@ -1344,7 +1543,8 @@ class AudioCollection(Audio):
             offset_list.append(item['offset'])
             text_list.append(item['text'])
 
-        super().__init__(audio_files_list, duration_list, offset_list, text_list, *args, **kwargs)
+        super().__init__(audio_files_list, duration_list,
+                         offset_list, text_list, *args, **kwargs)
 
     def __parse_item(self, line: str, manifest_file: str) -> Dict[str, Any]:
         """Parse a single line from a manifest file.
@@ -1379,9 +1579,11 @@ class AudioCollection(Audio):
                     elif isinstance(item_key, list):
                         audio_file += item_key
                     else:
-                        raise ValueError(f'Unexpected type {type(item_key)} of item for key {key}: {item_key}')
+                        raise ValueError(
+                            f'Unexpected type {type(item_key)} of item for key {key}: {item_key}')
             else:
-                raise ValueError(f'Unexpected type {type(manifest_key)} of manifest_key: {manifest_key}')
+                raise ValueError(
+                    f'Unexpected type {type(manifest_key)} of manifest_key: {manifest_key}')
 
             return audio_file
 
@@ -1397,21 +1599,25 @@ class AudioCollection(Audio):
             # Get full path to audio file(s)
             if isinstance(audio_file, str):
                 # This dictionary entry points to a single file
-                audio_files[audio_key] = manifest.get_full_path(audio_file, manifest_file)
+                audio_files[audio_key] = manifest.get_full_path(
+                    audio_file, manifest_file)
             elif isinstance(audio_file, Iterable):
                 # This dictionary entry points to multiple files
                 # Get the files and keep the list structure for this key
-                audio_files[audio_key] = [manifest.get_full_path(f, manifest_file) for f in audio_file]
+                audio_files[audio_key] = [manifest.get_full_path(
+                    f, manifest_file) for f in audio_file]
             elif audio_file is None and audio_key.startswith('target'):
                 # For inference, we don't need the target
                 audio_files[audio_key] = None
             else:
-                raise ValueError(f'Unexpected type {type(audio_file)} of audio_file: {audio_file}')
+                raise ValueError(
+                    f'Unexpected type {type(audio_file)} of audio_file: {audio_file}')
         item['audio_files'] = audio_files
 
         # Handle duration
         if 'duration' not in item:
-            raise ValueError(f'Duration not available in line: {line}. Manifest file: {manifest_file}')
+            raise ValueError(
+                f'Duration not available in line: {line}. Manifest file: {manifest_file}')
 
         # Handle offset
         if 'offset' not in item:
@@ -1487,13 +1693,17 @@ class FeatureLabel(_Collection):
 
         if do_sort_by_duration:
             if index_by_file_id:
-                logging.warning("Tried to sort dataset by duration, but cannot since index_by_file_id is set.")
+                logging.warning(
+                    "Tried to sort dataset by duration, but cannot since index_by_file_id is set.")
             else:
                 data.sort(key=lambda entity: entity.duration)
 
-        logging.info(f"Filtered duration for loading collection is {duration_filtered / 2600:.2f} hours.")
-        logging.info(f"Dataset loaded with {len(data)} items, total duration of {total_duration / 3600: .2f} hours.")
-        logging.info("# {} files loaded including # {} unique labels".format(len(data), len(self.uniq_labels)))
+        logging.info(
+            f"Filtered duration for loading collection is {duration_filtered / 2600:.2f} hours.")
+        logging.info(
+            f"Dataset loaded with {len(data)} items, total duration of {total_duration / 3600: .2f} hours.")
+        logging.info("# {} files loaded including # {} unique labels".format(
+            len(data), len(self.uniq_labels)))
         super().__init__(data)
 
 
@@ -1550,15 +1760,18 @@ class ASRFeatureLabel(FeatureLabel):
             raise ValueError(
                 f"Manifest file has invalid json line " f"structure: {line} without proper 'feature_file' key."
             )
-        item['feature_file'] = manifest.get_full_path(audio_file=item['feature_file'], manifest_file=manifest_file)
+        item['feature_file'] = manifest.get_full_path(
+            audio_file=item['feature_file'], manifest_file=manifest_file)
 
         # Label.
         if 'label' in item:
             item['label'] = item.pop('label')
         else:
-            raise ValueError(f"Manifest file has invalid json line structure: {line} without proper 'label' key.")
+            raise ValueError(
+                f"Manifest file has invalid json line structure: {line} without proper 'label' key.")
 
-        item = dict(feature_file=item['feature_file'], label=item['label'], duration=item['duration'])
+        item = dict(feature_file=item['feature_file'],
+                    label=item['label'], duration=item['duration'])
 
         return item
 
@@ -1646,7 +1859,8 @@ class FeatureText(_Collection):
                         if lang is not None:
                             text_tokens = parser(text, lang)
                         else:
-                            raise ValueError("lang required in manifest when using aggregate tokenizers")
+                            raise ValueError(
+                                "lang required in manifest when using aggregate tokenizers")
                     else:
                         text_tokens = parser(text)
                 else:
@@ -1660,7 +1874,8 @@ class FeatureText(_Collection):
             total_duration += duration
 
             data.append(
-                output_type(id_, feat_file, rttm_file, duration, text_tokens, offset, text, speaker, orig_sr, lang)
+                output_type(id_, feat_file, rttm_file, duration,
+                            text_tokens, offset, text, speaker, orig_sr, lang)
             )
             if index_by_file_id:
                 file_id, _ = os.path.splitext(os.path.basename(feat_file))
@@ -1674,12 +1889,15 @@ class FeatureText(_Collection):
 
         if do_sort_by_duration:
             if index_by_file_id:
-                logging.warning("Tried to sort dataset by duration, but cannot since index_by_file_id is set.")
+                logging.warning(
+                    "Tried to sort dataset by duration, but cannot since index_by_file_id is set.")
             else:
                 data.sort(key=lambda entity: entity.duration)
 
-        logging.info("Dataset loaded with %d files totalling %.2f hours", len(data), total_duration / 3600)
-        logging.info("%d files were filtered totalling %.2f hours", num_filtered, duration_filtered / 3600)
+        logging.info("Dataset loaded with %d files totalling %.2f hours", len(
+            data), total_duration / 3600)
+        logging.info("%d files were filtered totalling %.2f hours",
+                     num_filtered, duration_filtered / 3600)
 
         super().__init__(data)
 
