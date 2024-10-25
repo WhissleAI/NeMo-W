@@ -3,6 +3,7 @@
 *.pkl
 #*.ipynb
 output
+output_2048
 result
 *.pt
 tests/data/asr
@@ -180,3 +181,4 @@ examples/neural_graphs/*.yml
 nemo_experiments/
 
 balu_codes/test_experiments/
+slurm*.out

@@ -17,7 +17,7 @@ import os
 import tempfile
 from abc import ABC, abstractmethod
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, fields, is_dataclass
 from functools import partial
 from typing import Any, Dict, List, Optional, Tuple, Union
 
@@ -28,8 +28,9 @@ from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
 from nemo.collections.asr.parts.preprocessing.perturb import process_augmentations
-from nemo.collections.asr.parts.preprocessing.segment import AudioSegment
-from nemo.collections.asr.parts.utils.audio_utils import ChannelSelectorType
+from nemo.collections.asr.parts.preprocessing.segment import AudioSegment, ChannelSelectorType
+from nemo.collections.asr.parts.utils import manifest_utils
+from nemo.collections.common.data.utils import move_data_to_device
 from nemo.utils import logging, logging_mode
 
 TranscriptionReturnType = Union[List[str], List['Hypothesis'], Tuple[List[str]], Tuple[List['Hypothesis']]]
@@ -50,6 +51,7 @@ class InternalTranscribeConfig:
 
     # Scratch space
     temp_dir: Optional[str] = None
+    manifest_filepath: Optional[str] = None
 
 
 @dataclass
@@ -65,20 +67,6 @@ class TranscribeConfig:
     partial_hypothesis: Optional[List[Any]] = None
 
     _internal: Optional[InternalTranscribeConfig] = None
-
-
-def move_to_device(batch, device):
-    """
-    Recursively move all tensors in `batch` to `device`.
-    """
-    if isinstance(batch, torch.Tensor):
-        return batch.to(device)
-    elif isinstance(batch, (list, tuple)):
-        return [move_to_device(x, device) for x in batch]
-    elif isinstance(batch, dict):
-        return {k: move_to_device(v, device) for k, v in batch.items()}
-    else:
-        raise TypeError(f"Unsupported type: {type(batch)}")
 
 
 def get_value_from_transcription_config(trcfg, key, default):
@@ -148,11 +136,9 @@ class TranscriptionTensorDataset(Dataset):
         # Calculate seq length
         seq_len = torch.tensor(samples.shape[0], dtype=torch.long)
 
-        # Dummy text tokens
-        text_tokens = torch.tensor([0], dtype=torch.long)
-        text_tokens_len = torch.tensor(1, dtype=torch.long)
-
-        return (samples, seq_len, text_tokens, text_tokens_len)
+        # Typically NeMo ASR models expect the mini-batch to be a 4-tuple of (audio, audio_len, text, text_len).
+        # For inference, we set text and text_len to None to not disrupt the shape of the tuple.
+        return samples, seq_len, None, None
 
 
 class TranscriptionMixin(ABC):
@@ -183,10 +169,10 @@ class TranscriptionMixin(ABC):
 
     """
 
-    @torch.no_grad()
+    @torch.inference_mode()
     def transcribe(
         self,
-        audio: Union[str, List[str], np.ndarray],
+        audio: Union[str, List[str], np.ndarray, DataLoader],
         batch_size: int = 4,
         return_hypotheses: bool = False,
         num_workers: int = 0,
@@ -201,6 +187,7 @@ class TranscriptionMixin(ABC):
 
         Args:
             audio: (a single or list) of paths to audio files or a np.ndarray audio array.
+                Can also be a dataloader object that provides values that can be consumed by the model.
                 Recommended length per file is between 5 and 25 seconds.
                 But it is possible to pass a few hours long file if enough GPU memory is available.
             batch_size: (int) batch size to use during inference.
@@ -368,7 +355,11 @@ class TranscriptionMixin(ABC):
             with tempfile.TemporaryDirectory() as tmpdir:
                 transcribe_cfg._internal.temp_dir = tmpdir
 
-                dataloader = self._transcribe_input_processing(audio, transcribe_cfg)
+                # Create a DataLoader if not already present
+                if not isinstance(audio, DataLoader):
+                    dataloader = self._transcribe_input_processing(audio, transcribe_cfg)
+                else:
+                    dataloader = audio
 
                 if hasattr(transcribe_cfg, 'verbose'):
                     verbose = transcribe_cfg.verbose
@@ -377,8 +368,7 @@ class TranscriptionMixin(ABC):
 
                 for test_batch in tqdm(dataloader, desc="Transcribing", disable=not verbose):
                     # Move batch to device
-                    test_batch = move_to_device(test_batch, transcribe_cfg._internal.device)
-
+                    test_batch = move_data_to_device(test_batch, transcribe_cfg._internal.device)
                     # Run forward pass
                     model_outputs = self._transcribe_forward(test_batch, transcribe_cfg)
                     processed_outputs = self._transcribe_output_processing(model_outputs, transcribe_cfg)
@@ -474,6 +464,11 @@ class TranscriptionMixin(ABC):
 
         # Check if audio is a list of strings (filepaths or manifests)
         if isinstance(audio[0], str):
+            if len(audio) == 1 and audio[0].endswith('.json') or audio[0].endswith('.jsonl'):
+                # Assume it is a path to a manifest file
+                trcfg._internal.manifest_filepath = audio[0]
+                audio = manifest_utils.read_manifest(audio[0])
+
             audio_files = list(audio)
 
             tmp_dir = trcfg._internal.temp_dir
@@ -769,13 +764,13 @@ class ASRTranscriptionMixin(TranscriptionMixin):
 
         # Unfreeze the encoder and decoder modules
         if hasattr(self, 'encoder'):
-            self.encoder.unfreeze()
+            self.encoder.unfreeze(partial=True)
 
         if hasattr(self, 'decoder'):
-            self.decoder.unfreeze()
+            self.decoder.unfreeze(partial=True)
 
         if hasattr(self, 'joint'):
-            self.joint.unfreeze()
+            self.joint.unfreeze(partial=True)
 
     @classmethod
     def get_transcribe_config(cls) -> TranscribeConfig:

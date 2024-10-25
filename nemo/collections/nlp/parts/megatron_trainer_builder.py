@@ -13,13 +13,15 @@
 # limitations under the License.
 
 import sys
-from typing import Union
+from typing import Optional, Union
 
-from omegaconf import DictConfig
+from lightning_fabric.utilities.exceptions import MisconfigurationException
+from omegaconf import DictConfig, open_dict
 from pytorch_lightning import Trainer
 from pytorch_lightning.callbacks import ModelSummary
 from pytorch_lightning.plugins.environments import TorchElasticEnvironment
 
+from nemo.collections.common.metrics.perf_metrics import FLOPsMeasurementCallback
 from nemo.collections.nlp.parts.nlp_overrides import (
     CustomProgressBar,
     FSDPMixedPrecisionPlugin,
@@ -31,7 +33,11 @@ from nemo.collections.nlp.parts.nlp_overrides import (
     PipelineMixedPrecisionPlugin,
 )
 from nemo.utils import logging
-from nemo.utils.callbacks.dist_ckpt_io import DistributedCheckpointIO
+from nemo.utils.callbacks.dist_ckpt_io import (
+    AsyncFinalizableCheckpointIO,
+    AsyncFinalizerCallback,
+    DistributedCheckpointIO,
+)
 
 
 class MegatronTrainerBuilder:
@@ -51,7 +57,10 @@ class MegatronTrainerBuilder:
         _IS_INTERACTIVE = hasattr(sys, "ps1") or bool(sys.flags.interactive)
         if _IS_INTERACTIVE and self.cfg.trainer.devices == 1:
             logging.info("Detected interactive environment, using NLPDDPStrategyNotebook")
-            return NLPDDPStrategyNotebook(no_ddp_communication_hook=True, find_unused_parameters=False,)
+            return NLPDDPStrategyNotebook(
+                no_ddp_communication_hook=True,
+                find_unused_parameters=False,
+            )
 
         if self.cfg.model.get('fsdp', False):
             assert (
@@ -82,6 +91,7 @@ class MegatronTrainerBuilder:
             find_unused_parameters=False,
             nccl_communicator_config_path=self.cfg.model.get('nccl_communicator_config_path', None),
             sharp=self.cfg.model.get('sharp', False),
+            dist_ckpt_parallel_save=self.cfg.model.get('dist_ckpt_parallel_dist_opt', True),
         )
 
     def _grad_scaler(self) -> GradScaler:
@@ -89,7 +99,7 @@ class MegatronTrainerBuilder:
         Returns a scaler for precision plugins.
         """
         return GradScaler(
-            init_scale=self.cfg.model.get('native_amp_init_scale', 2 ** 32),
+            init_scale=self.cfg.model.get('native_amp_init_scale', 2**32),
             growth_interval=self.cfg.model.get('native_amp_growth_interval', 1000),
             hysteresis=self.cfg.model.get('hysteresis', 2),
         )
@@ -137,19 +147,59 @@ class MegatronTrainerBuilder:
         use_dist_ckpt = not self.cfg.model.get('fsdp', False) and (
             self.cfg.model.get('mcore_gpt', False) or self.cfg.model.get('mcore_bert', False)
         )
+        # exp_manager == None is valid and indicates no exp_manager should be initialized
+        async_save = (
+            (self.cfg.get('exp_manager', {}) or {}).get('checkpoint_callback_params', {}).get('async_save', False)
+        )
         if use_dist_ckpt:
-            plugins.append(DistributedCheckpointIO(self.cfg.model.get('dist_ckpt_format', 'zarr')))
+            checkpoint_io = DistributedCheckpointIO.from_config(self.cfg.model, async_save)
+            if async_save:
+                checkpoint_io = AsyncFinalizableCheckpointIO(checkpoint_io)
+            plugins.append(checkpoint_io)
+        elif async_save:
+            raise MisconfigurationException(
+                'exp_manager.checkpoint_callback_params.async_save=True without'
+                'distributed checkpoints is currently not supported'
+            )
 
         return plugins
 
+    def _callbacks(self, callbacks: Optional[list]) -> list:
+        """
+        Returns:
+            callbacks: list of callbacks passed to Trainer.callbacks.
+        """
+        if callbacks is None:
+            callbacks = []
+        # enable_progress_bar is True by default. If cfg.trainer.enable_progress_bar=False, CustomProgressBar is not appended to callbacks
+        if 'enable_progress_bar' not in self.cfg.trainer or self.cfg.trainer.enable_progress_bar:
+            callbacks.append(CustomProgressBar())
+
+        # exp_manager == None is valid and indicates no exp_manager should be initialized
+        if (self.cfg.get('exp_manager', {}) or {}).get('checkpoint_callback_params', {}).get('async_save', False):
+            callbacks.append(AsyncFinalizerCallback())
+
+        # exp_manager == None is valid and indicates no exp_manager should be initialized
+        if (self.cfg.get('exp_manager', {}) or {}).get('log_tflops_per_sec_per_gpu', True):
+            callbacks.append(FLOPsMeasurementCallback(self.cfg))
+
+        return callbacks
+
     def create_trainer(self, callbacks=None) -> Trainer:
+        # Make a dummy train step if skip_train
+        if self.cfg.model.get("skip_train", False):
+            self.cfg.trainer.max_steps = 1
+            self.cfg.trainer.val_check_interval = 1
+            # Set num_sanity_val_steps to 0
+            with open_dict(self.cfg.trainer):
+                self.cfg.trainer.num_sanity_val_steps = 0
+            self.cfg.exp_manager.create_checkpoint_callback = False
+
         # cfg.trainer.precision becomes None in Trainer if precision_plugins exist since both precision plugins and precision
         precision = self.cfg.trainer.precision
         strategy = self._training_strategy()
         plugins = self._plugins()
-        # enable_progress_bar is True by default. If cfg.trainer.enable_progress_bar=False, CustomProgressBar is not appended to callbacks
-        if 'enable_progress_bar' not in self.cfg.trainer or self.cfg.trainer.enable_progress_bar:
-            callbacks = [CustomProgressBar()]
+        callbacks = self._callbacks(callbacks)
         trainer = Trainer(plugins=plugins, strategy=strategy, **self.cfg.trainer, callbacks=callbacks)
         # Restore the precision value after Trainer is built.
         self.cfg.trainer.precision = precision
@@ -161,7 +211,7 @@ class MegatronBertTrainerBuilder(MegatronTrainerBuilder):
 
     def _grad_scaler(self) -> GradScaler:
         return GradScaler(
-            init_scale=self.cfg.model.get('native_amp_init_scale', 2 ** 32),
+            init_scale=self.cfg.model.get('native_amp_init_scale', 2**32),
             growth_interval=self.cfg.model.get('native_amp_growth_interval', 1000),
         )
 
@@ -169,13 +219,15 @@ class MegatronBertTrainerBuilder(MegatronTrainerBuilder):
 class MegatronT5TrainerBuilder(MegatronTrainerBuilder):
     """Builder for T5 model Trainer with overrides."""
 
-    def create_trainer(self) -> Trainer:
+    def _callbacks(self, callbacks: Optional[list]) -> list:
+        callbacks = super()._callbacks(callbacks)
+        callbacks.append(ModelSummary(max_depth=3))
+        return callbacks
+
+    def create_trainer(self, callbacks=None) -> Trainer:
         strategy = self._training_strategy()
         plugins = self._plugins()
-        callbacks = [ModelSummary(max_depth=3)]
-        # enable_progress_bar is True by default. If cfg.trainer.enable_progress_bar=False, CustomProgressBar is not appended to callbacks
-        if 'enable_progress_bar' not in self.cfg.trainer or self.cfg.trainer.enable_progress_bar:
-            callbacks.append(CustomProgressBar())
+        callbacks = self._callbacks(callbacks)
         return Trainer(plugins=plugins, strategy=strategy, **self.cfg.trainer, callbacks=callbacks)
 
 
@@ -207,7 +259,7 @@ class MegatronLMPPTrainerBuilder(MegatronTrainerBuilder):
 
     def _grad_scaler(self) -> GradScaler:
         return GradScaler(
-            init_scale=self.cfg.model.get("native_amp_init_scale", 2 ** 32),
+            init_scale=self.cfg.model.get("native_amp_init_scale", 2**32),
             growth_interval=self.cfg.model.get("native_amp_growth_interval", 1000),
             hysteresis=self.cfg.model.get("hysteresis", 2),
             enabled=False if self.cfg.model.pipeline_model_parallel_size > 1 else True,
