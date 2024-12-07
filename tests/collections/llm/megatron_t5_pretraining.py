@@ -18,8 +18,8 @@
 import argparse
 
 import torch
+from lightning.pytorch.loggers import WandbLogger
 from megatron.core.optimizer import OptimizerConfig
-from pytorch_lightning.loggers import WandbLogger
 
 from nemo import lightning as nl
 from nemo.collections import llm
@@ -50,10 +50,13 @@ if __name__ == '__main__':
 
     args = get_args()
 
+    special_tokens = {}
+    special_tokens['additional_special_tokens'] = [f'<extra_id_{i}>' for i in range(100)]
     tokenizer = get_nmt_tokenizer(
         "megatron",
         "BertWordPieceCase",
         vocab_file=args.vocab_path,
+        special_tokens=special_tokens,
     )
     data = PreTrainingDataModule(
         paths=args.data_path,
