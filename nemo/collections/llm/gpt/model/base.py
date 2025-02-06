@@ -40,7 +40,7 @@ _, HAVE_TE = safe_import("transformer_engine")
 # TODO: Clean this up with a getter and install instructions
 _grad_accum_fusion_available = True
 try:
-    import fused_weight_gradient_mlp_cuda
+    import fused_weight_gradient_mlp_cuda  # noqa: F401  # pylint: disable=unused-import
 except ImportError:
     _grad_accum_fusion_available = False
 
@@ -176,6 +176,7 @@ class GPTConfig(TransformerConfig, io.IOMixin):
     gradient_accumulation_fusion: bool = _grad_accum_fusion_available
     deallocate_pipeline_outputs: bool = True
     scatter_embedding_sequence_parallel: bool = True
+    tp_only_amax_red: bool = False
 
     use_transformer_engine_full_layer_spec: bool = False
     transformer_layer_spec: Union[ModuleSpec, Callable[["GPTConfig"], ModuleSpec]] = default_layer_spec
@@ -206,10 +207,11 @@ class GPTConfig(TransformerConfig, io.IOMixin):
 
         if hasattr(self, 'vocab_size'):
             vocab_size = self.vocab_size
-            logging.info(
-                f"Use preset vocab_size: {vocab_size}, original vocab_size: {tokenizer.vocab_size}, dummy tokens:"
-                f" {vocab_size - tokenizer.vocab_size}."
-            )
+            if tokenizer is not None:
+                logging.info(
+                    f"Use preset vocab_size: {vocab_size}, original vocab_size: {tokenizer.vocab_size}, dummy tokens:"
+                    f" {vocab_size - tokenizer.vocab_size}."
+                )
         else:
             vocab_size = get_vocab_size(self, tokenizer.vocab_size, self.make_vocab_size_divisible_by)
 
@@ -235,7 +237,8 @@ class GPTConfig(TransformerConfig, io.IOMixin):
         # TP, CP group to the TE modules.
         # Deep iterate but skip self to avoid infinite recursion.
         if HAVE_TE and self.use_transformer_engine_full_layer_spec:
-            # Copied from: https://github.com/NVIDIA/TransformerEngine/blob/main/transformer_engine/pytorch/transformer.py
+            # Copied from:
+            # https://github.com/NVIDIA/TransformerEngine/blob/main/transformer_engine/pytorch/transformer.py
             if parallel_state.get_tensor_model_parallel_world_size() > 1:
                 for index, child in enumerate(model.modules()):
                     if index == 0:
@@ -405,11 +408,22 @@ class GPTModel(L.LightningModule, io.IOMixin, io.ConnectorMixin, fn.FNMixin):
         if mcore_model is None or type(mcore_model) is not MCoreGPTModel:
             raise ValueError("Exact McoreGPTModel instance not found in the model structure.")
 
+        vocab_size = None
+        if self.tokenizer is not None:
+            vocab_size = self.tokenizer.vocab_size
+        elif hasattr(self.config, 'vocab_size'):
+            vocab_size = self.config.vocab_size
+        else:
+            raise ValueError(
+                'Unable to find vocab size.'
+                ' Either pass in a tokenizer with vocab size, or set vocab size in the model config'
+            )
+
         inference_wrapper_config = InferenceWrapperConfig(
             hidden_size=mcore_model.config.hidden_size,
             params_dtype=params_dtype,
             inference_batch_times_seqlen_threshold=inference_batch_times_seqlen_threshold,
-            padded_vocab_size=self.tokenizer.vocab_size,
+            padded_vocab_size=vocab_size,
         )
 
         model_inference_wrapper = GPTInferenceWrapper(mcore_model, inference_wrapper_config)
@@ -448,8 +462,8 @@ def get_batch_on_this_context_parallel_rank(batch) -> Dict[str, torch.Tensor]:
                     val.shape[seq_dim] // (2 * cp_size),
                     *val.shape[(seq_dim + 1) :],
                 )
-                index = torch.tensor([cp_rank, (2 * cp_size - cp_rank - 1)], device="cpu", pin_memory=True).cuda(
-                    non_blocking=True
+                index = torch.tensor([cp_rank, (2 * cp_size - cp_rank - 1)], device="cpu", pin_memory=True).to(
+                    _val.device, non_blocking=True
                 )
                 _val = _val.index_select(seq_dim, index)
                 _val = _val.view(*val.shape[0:seq_dim], -1, *_val.shape[(seq_dim + 2) :])
