@@ -22,7 +22,7 @@ from transformers import AutoProcessor
 from nemo import lightning as nl
 from nemo.collections import llm, vlm
 from nemo.collections.vlm import ImageDataConfig
-from nemo.collections.vlm.mllama.data.lazy import MLlamaLazyDataModule
+from nemo.collections.vlm.mllama.data.preloaded import MLlamaPreloadedDataModule
 from nemo.lightning.pytorch.optim import CosineAnnealingScheduler
 from nemo.lightning.pytorch.optim.megatron import MegatronOptimizerModule
 from nemo.utils.exp_manager import TimingCallback
@@ -60,9 +60,11 @@ def main(args):
     else:
         model_id = "meta-llama/Llama-3.2-11B-Vision-Instruct"
 
+    from nemo.collections.common.tokenizers.huggingface.auto_tokenizer import AutoTokenizer
+
     processor = AutoProcessor.from_pretrained(model_id)
     image_processor = processor.image_processor
-    tokenizer = processor.tokenizer
+    tokenizer = AutoTokenizer(model_id)
     if args.data_type == "llava":
         # Data configuration
         data_config = ImageDataConfig(
@@ -71,7 +73,7 @@ def main(args):
         )
 
         # Data module setup
-        data = MLlamaLazyDataModule(
+        data = MLlamaPreloadedDataModule(
             paths=args.data_path,
             data_config=data_config,
             seq_length=seq_length,
@@ -102,8 +104,9 @@ def main(args):
         "meta-llama/Llama-3.2-90B-Vision-Instruct": vlm.MLlamaConfig90BInstruct,
     }
     conf = model_configs[model_id]()
-    if args.pp_size > 1:
-        conf.language_model_config.first_pipeline_num_layers = 0
+    if args.use_toy_model:
+        conf.language_model_config.num_layers = 4
+
     model = vlm.MLlamaModel(conf, tokenizer=tokenizer)
 
     # Training strategy setup
@@ -204,7 +207,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--restore_path", type=str, required=False, default=None, help="Path to restore model from checkpoint"
     )
-    parser.add_argument("--data_type", type=str, required=False, default="mock", help="mock | llava")
+    parser.add_argument("--data_type", type=str, required=False, default="mock", help="mock | llava | energon")
     parser.add_argument("--data_path", type=str, required=False, help="Path to the dataset")
     parser.add_argument("--image_folder", type=str, required=False, help="Path to the image folder")
     parser.add_argument(
@@ -226,6 +229,10 @@ if __name__ == "__main__":
     parser.add_argument("--gbs", type=int, required=False, default=64, help="Global batch size")
     parser.add_argument("--mbs", type=int, required=False, default=2, help="Micro batch size")
     parser.add_argument("--lr", type=float, required=False, default=2.0e-06, help="Learning rate")
-
+    parser.add_argument(
+        "--use_toy_model",
+        action="store_true",
+        help="Toy size model used for testing",
+    )
     args = parser.parse_args()
     main(args)

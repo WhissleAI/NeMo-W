@@ -64,12 +64,14 @@ def model() -> run.Config[pl.LightningModule]:
 
 def trainer(
     tensor_parallelism: int = 8,
-    pipeline_parallelism: int = 9,
+    pipeline_parallelism: int = 8,
     pipeline_parallelism_type: Optional[torch.dtype] = torch.bfloat16,
     virtual_pipeline_parallelism: Optional[int] = 2,
     context_parallelism: int = 4,
     sequence_parallelism: bool = True,
-    num_nodes: int = 72,
+    account_for_embedding_in_pipeline_split: bool = True,
+    account_for_loss_in_pipeline_split: bool = True,
+    num_nodes: int = 64,
     num_gpus_per_node: int = 8,
     max_steps: int = 1168251,
     callbacks: Optional[list[run.Config[Callback]]] = None,
@@ -113,6 +115,8 @@ def trainer(
         virtual_pipeline_model_parallel_size=virtual_pipeline_parallelism,
         context_parallel_size=context_parallelism,
         sequence_parallel=sequence_parallelism,
+        account_for_embedding_in_pipeline_split=account_for_embedding_in_pipeline_split,
+        account_for_loss_in_pipeline_split=account_for_loss_in_pipeline_split,
         gradient_as_bucket_view=True,
         ckpt_async_save=True,
         ckpt_parallel_load=True,
@@ -342,6 +346,9 @@ def finetune_recipe(
     if performance_mode:
         recipe = finetune_performance_optimizations(recipe, peft_scheme)
 
+    recipe.trainer.strategy.account_for_embedding_in_pipeline_split = True
+    recipe.trainer.strategy.account_for_loss_in_pipeline_split = True
+
     return recipe
 
 
@@ -368,14 +375,13 @@ def finetune_performance_optimizations(
         It may not be suitable for all hardware configurations or use cases.
     """
 
-    if not recipe.trainer.callbacks:
+    if not hasattr(recipe.trainer, "callbacks") or recipe.trainer.callbacks is None:
         recipe.trainer.callbacks = []
 
     if peft_scheme is None or peft_scheme.lower() == 'none':
         # Note: limited support. This is not necessarily the most optimized setting
         recipe.trainer.strategy.tensor_model_parallel_size = 8
         recipe.trainer.strategy.pipeline_model_parallel_size = 14
-        recipe.trainer.plugins.grad_reduce_in_fp32 = False
         recipe.trainer.strategy.ddp = run.Config(
             DistributedDataParallelConfig,
             check_for_nan_in_grad=True,
@@ -394,9 +400,17 @@ def finetune_performance_optimizations(
         )
     else:
         recipe.trainer.strategy.tensor_model_parallel_size = 4
-        recipe.trainer.strategy.pipeline_model_parallel_size = 6
-        recipe.trainer.strategy.virtual_pipeline_model_parallel_size = 7
+        recipe.trainer.strategy.pipeline_model_parallel_size = 4
+        recipe.trainer.strategy.virtual_pipeline_model_parallel_size = 4
         recipe.peft.target_modules = ['linear_qkv']
+        recipe.trainer.callbacks.append(
+            run.Config(
+                MegatronCommOverlapCallback,
+                tp_comm_overlap=False,
+            )
+        )
+
+    recipe.trainer.plugins.grad_reduce_in_fp32 = False
 
     recipe.trainer.strategy.sequence_parallel = True
 

@@ -13,9 +13,24 @@
 # limitations under the License.
 
 """
-Example:
+Mock Data Example:
   torchrun --nproc_per_node=8 scripts/vlm/neva_finetune.py \
   --devices=8 --tp=4 --data_type=mock
+
+Llava Data Example:
+   torchrun --nproc_per_node=8 /path/to/NeMo/scripts/vlm/neva_finetune.py  \
+     --data_path "/path/to/dataset/llava_v1_5_mix665k.json" \
+     --image_folder "/path/to/dataset/images" \
+     --data_type llava \
+     --num_nodes 1 \
+     --log_dir "/path/to/experiments/neva_finetune" \
+     --devices=8 \
+     --projector_type=mcore_mlp \
+     --tp_size 2 --pp_size 1 \
+     --gbs 128 --mbs 4 \
+     --wandb_project=neva_demo \
+     --name=neva_finetune \
+     --restore_path "/path/to/experiments/neva_pretrain_checkpoint"
 """
 
 import argparse
@@ -59,6 +74,8 @@ def main(args):
         hidden_size=language_transformer_config.hidden_size,
         ffn_hidden_size=language_transformer_config.hidden_size,
     )
+    if args.use_toy_model:
+        language_transformer_config.num_layers = 2
 
     # NEVA model configuration
     neva_config = vlm.NevaConfig(
@@ -79,7 +96,7 @@ def main(args):
         )
 
         # Data module setup
-        data = vlm.NevaLazyDataModule(
+        data = vlm.NevaPreloadedDataModule(
             paths=args.data_path,
             data_config=data_config,
             seq_length=decoder_seq_length,
@@ -94,7 +111,7 @@ def main(args):
         )
     elif args.data_type == "energon":
         from transformers import AutoProcessor
-
+        from nemo.collections.common.tokenizers.huggingface.auto_tokenizer import AutoTokenizer
         from nemo.collections.multimodal.data.energon import (
             EnergonMultiModalDataModule,
             ImageToken,
@@ -103,8 +120,8 @@ def main(args):
         )
 
         processor = AutoProcessor.from_pretrained("llava-hf/llava-1.5-7b-hf")
-        tokenizer = processor.tokenizer
         image_processor = processor.image_processor
+        tokenizer = AutoTokenizer("llava-hf/llava-1.5-7b-hf")
 
         # Configure multimodal samples
         config = MultiModalSampleConfig(
@@ -128,7 +145,9 @@ def main(args):
                 image_processor=image_processor,
                 multimodal_sample_config=config,
                 packed_sequence=args.use_packed_sequence,
-                packed_sequence_size=decoder_seq_length,
+                # leave some space for perf padding, otherwise after packing and padding,
+                # it will go beyond max seq len, then it will need a truncation.
+                packed_sequence_size=int(decoder_seq_length * 0.9),
                 num_image_embeddings_per_tile=num_image_embeddings_per_tile,
             ),
             packing_buffer_size=200 if args.use_packed_sequence else None,
@@ -159,10 +178,11 @@ def main(args):
         ddp=DistributedDataParallelConfig(
             check_for_nan_in_grad=True,
             grad_reduce_in_fp32=True,
-            overlap_grad_reduce=True,
-            overlap_param_gather=True,
+            overlap_grad_reduce=False,
+            overlap_param_gather=False,
             average_in_collective=True,
         ),
+        ckpt_load_strictness="log_all",
     )
 
     model = vlm.NevaModel(neva_config, tokenizer=data.tokenizer)
@@ -187,7 +207,7 @@ def main(args):
         callbacks=[
             checkpoint_callback,
             TimingCallback(),
-            MegatronCommOverlapCallback(tp_comm_overlap=True),
+            MegatronCommOverlapCallback(tp_comm_overlap=False),
         ],
         val_check_interval=500,
         limit_val_batches=gbs,
@@ -255,7 +275,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="NEVA Model Training Script")
 
     # Argument parsing
-    parser.add_argument("--data_type", type=str, required=False, default="mock", help="mock | llava")
+    parser.add_argument("--data_type", type=str, required=False, default="mock", help="mock | llava | energon")
     parser.add_argument("--data_path", type=str, required=False, default=None, help="Path to the dataset JSON file")
     parser.add_argument("--image_folder", type=str, required=False, default=None, help="Path to the image folder")
     parser.add_argument(
@@ -284,6 +304,11 @@ if __name__ == "__main__":
     parser.add_argument(
         "--use_packed_sequence",
         action="store_true",
+    )
+    parser.add_argument(
+        "--use_toy_model",
+        action="store_true",
+        help="Toy size model used for testing",
     )
     args = parser.parse_args()
     main(args)

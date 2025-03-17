@@ -366,14 +366,13 @@ def finetune_performance_optimizations(
         It may not be suitable for all hardware configurations or use cases.
     """
 
-    if not recipe.trainer.callbacks:
+    if not hasattr(recipe.trainer, "callbacks") or recipe.trainer.callbacks is None:
         recipe.trainer.callbacks = []
 
     if peft_scheme is None or peft_scheme.lower() == 'none':
         recipe.trainer.strategy.tensor_model_parallel_size = 4
         recipe.trainer.strategy.pipeline_model_parallel_size = 4
         recipe.trainer.strategy.virtual_pipeline_model_parallel_size = 5
-        recipe.trainer.plugins.grad_reduce_in_fp32 = False
         recipe.trainer.strategy.ddp = run.Config(
             DistributedDataParallelConfig,
             check_for_nan_in_grad=True,
@@ -402,6 +401,7 @@ def finetune_performance_optimizations(
             )
         )
 
+    recipe.trainer.plugins.grad_reduce_in_fp32 = False
     recipe.trainer.strategy.sequence_parallel = True
 
     recipe.trainer.callbacks.append(run.Config(TimingCallback))

@@ -60,11 +60,11 @@ def get_buffered_pred_feat_rnnt(
         filepaths = []
         with open(manifest, "r", encoding='utf_8') as mfst_f:
             print("Parsing manifest files...")
-            for l in mfst_f:
-                l = l.strip()
-                if not l:
+            for L in mfst_f:
+                L = L.strip()
+                if not L:
                     continue
-                row = json.loads(l)
+                row = json.loads(L)
                 audio_file = get_full_path(audio_file=row['audio_filepath'], manifest_file=manifest)
                 filepaths.append(audio_file)
                 if 'text' in row:
@@ -145,19 +145,19 @@ def get_buffered_pred_feat(
         raise ValueError("Either filepaths or manifest shoud not be None")
 
     if filepaths:
-        for l in tqdm(filepaths, desc="Sample:"):
+        for L in tqdm(filepaths, desc="Sample:"):
             asr.reset()
-            asr.read_audio_file(l, delay, model_stride_in_secs)
+            asr.read_audio_file(L, delay, model_stride_in_secs)
             hyp = asr.transcribe(tokens_per_chunk, delay)
             hyps.append(hyp)
     else:
         with open(manifest, "r", encoding='utf_8') as mfst_f:
-            for l in tqdm(mfst_f, desc="Sample:"):
+            for L in tqdm(mfst_f, desc="Sample:"):
                 asr.reset()
-                l = l.strip()
-                if not l:
+                L = L.strip()
+                if not L:
                     continue
-                row = json.loads(l)
+                row = json.loads(L)
                 if 'text' in row:
                     refs.append(row['text'])
                 audio_file = get_full_path(audio_file=row['audio_filepath'], manifest_file=manifest)
@@ -452,7 +452,7 @@ def write_transcription(
                     item = {'audio_filepath': filepaths[idx], pred_text_attr_name: transcription.text}
 
                     if timestamps:
-                        timestamps = transcription.timestep
+                        timestamps = transcription.timestamp
                         if timestamps is not None and isinstance(timestamps, dict):
                             timestamps.pop(
                                 'timestep', None
@@ -480,7 +480,7 @@ def write_transcription(
                         item[pred_text_attr_name] = best_hyps[idx].text
 
                         if timestamps:
-                            timestamps = best_hyps[idx].timestep
+                            timestamps = best_hyps[idx].timestamp
                             if timestamps is not None and isinstance(timestamps, dict):
                                 timestamps.pop(
                                     'timestep', None
@@ -593,61 +593,6 @@ def compute_metrics_per_sample(
     return samples_with_metrics
 
 
-def process_timestamp_outputs(outputs, subsampling_factor: int = 1, window_stride: float = 0.01):
-    """
-    Process the timestamps from list of hypothesis to user friendly format.
-    Converts the start and end duration from frames to seconds.
-    Args:
-        outputs: List of Hypothesis objects.
-        subsampling_factor: int, Subsampling factor used in the model.
-        window_stride: float, Window stride used in the model. (sometimes referred to as hop length/shift)
-    Returns:
-        List of Hypothesis objects with processed timestamps
-
-    """
-
-    if outputs is None:
-        return outputs
-
-    if isinstance(outputs, rnnt_utils.Hypothesis):
-        outputs = [outputs]
-
-    if not isinstance(outputs[0], rnnt_utils.Hypothesis):
-        raise ValueError(f"Expected Hypothesis object, got {type(outputs[0])}")
-
-    def process_timestamp(timestamp, subsampling_factor, window_stride):
-        """
-        Process the timestamp for a single hypothesis.
-        return the start and end duration in seconds.
-        """
-        for idx, val in enumerate(timestamp):
-            start_offset = val['start_offset']
-            end_offset = val['end_offset']
-            start = start_offset * window_stride * subsampling_factor
-            end = end_offset * window_stride * subsampling_factor
-            val['start'] = start
-            val['end'] = end
-
-        return timestamp
-
-    for idx, hyp in enumerate(outputs):
-        if not hasattr(hyp, 'timestep'):
-            raise ValueError(
-                f"Expected Hypothesis object to have 'timestep' attribute, when compute_timestamps is \
-                    enabled but got {hyp}"
-            )
-        timestep = hyp.timestep
-        if 'word' in timestep:
-            outputs[idx].timestep['word'] = process_timestamp(timestep['word'], subsampling_factor, window_stride)
-        if 'char' in timestep:
-            outputs[idx].timestep['char'] = process_timestamp(timestep['char'], subsampling_factor, window_stride)
-        if 'segment' in timestep:
-            outputs[idx].timestep['segment'] = process_timestamp(
-                timestep['segment'], subsampling_factor, window_stride
-            )
-    return outputs
-
-
 class PunctuationCapitalization:
     def __init__(self, punctuation_marks: str):
         """
@@ -659,7 +604,7 @@ class PunctuationCapitalization:
         """
         if punctuation_marks:
             self.regex_punctuation = re.compile(fr"([{''.join(punctuation_marks)}])")
-            self.regex_extra_space = re.compile('\s{2,}')
+            self.regex_extra_space = re.compile(r'\s{2,}')
         else:
             self.regex_punctuation = None
 
