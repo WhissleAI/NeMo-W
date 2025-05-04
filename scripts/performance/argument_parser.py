@@ -77,6 +77,18 @@ def parse_cli_args():
         required=False,
         default="bf16",
     )
+    fp8_recipe_msg = (
+        "FP8 recipe. Options- ds (per-tensor delayed scaling), cs (per-tensor current scaling), mxfp8. Defaults to ds"
+    )
+    parser.add_argument(
+        "-fr",
+        "--fp8_recipe",
+        type=str,
+        choices=["ds", "cs", "mxfp8"],
+        help=fp8_recipe_msg,
+        required=False,
+        default="ds",
+    )
     parser.add_argument(
         "-en",
         "--enable_nsys",
@@ -249,11 +261,20 @@ def parse_cli_args():
         required=False,
         default=100,
     )
+
+    def bool_arg(arg):
+        if arg.lower() in ['true', '1', 't', 'yes', 'y']:
+            return True
+        elif arg.lower() in ['false', '0', 'f', 'no', 'n']:
+            return False
+        else:
+            raise ValueError(f"Invalid value for boolean argument: {arg}")
+
     parser.add_argument(
         "-cg",
         "--cuda_graphs",
         help="Enable CUDA graphs. Disabled by default",
-        action="store_true",
+        type=bool_arg,
         required=False,
         default=None,  # NOTE: DO NOT SET DEFAULT TO FALSE, IT WILL BE OVERRIDDEN BY THE RECOMMENDED MODEL CONFIGS
     )
@@ -261,7 +282,7 @@ def parse_cli_args():
         "-fsdp",
         "--use_mcore_fsdp",
         help="Enable Megatron Core (Mcore) FSDP. Disabled by default",
-        action="store_true",
+        type=bool_arg,
         required=False,
         default=None,
     )
@@ -270,7 +291,7 @@ def parse_cli_args():
         "--recompute_layers",
         type=int,
         help="Number of Transformer layers to recompute, where all the intermediate "
-        "activations of a Transformer layer are computed. Defaults to 0",
+        "activations of a Transformer layer are computed. Defaults to None",
         required=False,
         default=None,
     )
@@ -278,13 +299,24 @@ def parse_cli_args():
         "-ol",
         "--activation_offload_layers",
         type=int,
-        help="Number of Transformer layers to offload to the CPU memory. Defaults to 0",
+        help="Number of Transformer layers to offload to the CPU memory. Defaults to None",
         required=False,
         default=None,
     )
 
     def list_of_strings(arg):
         return arg.split(',')
+
+    parser.add_argument(
+        "-rm",
+        "--recompute_modules",
+        nargs="*",
+        const=None,
+        type=str,
+        help="List of modules to perform selective activation recompute. Users can provide 0 or any number of arguments. Defaults to None",
+        required=False,
+        default=None,
+    )
 
     parser.add_argument(
         "-cm",
