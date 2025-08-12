@@ -880,8 +880,13 @@ class GPTSFTPackedDataset(GPTSFTDataset):
                 # If padding, use the global max seqlen, so that 'pad_cu_seqlens' is the same
                 # across all batches. This is maintly used compatiblity with megatron's implementation
                 # of cudagraphs, which uses the same cudagraphs over all batches.
-                max_seqlen = [max(p["dataset_max_seqlen"] for p in self.pack_metadata)]
-                max_seqlen = torch.IntTensor(max_seqlen * len(cu_seqlens))
+                dataset_max_seqlen = max(p['dataset_max_seqlen'] for p in self.pack_metadata)
+                min_pack_seq_len = min(p['min_packed_seqlen'] for p in self.pack_metadata)
+                padding_gap = max_length - min_pack_seq_len
+
+                # Use the larger of the two values to avoid NAN issues with attention kernel
+                safe_max_seqlen = max(dataset_max_seqlen, padding_gap)
+                max_seqlen = torch.IntTensor([safe_max_seqlen] * len(cu_seqlens))
             else:
                 seqlens = cu_seqlens[:, 1:] - cu_seqlens[:, :-1]
                 max_seqlen, _ = seqlens.max(dim=1, keepdim=True)
@@ -1086,12 +1091,7 @@ class GPTSFTChatDataset(GPTSFTDataset):
         # information that might be useful for evaluation, debugging, or tracking
         # purposes.
         metadata = [item['metadata'] for item in batch]
-        if not self.use_hf_tokenizer_chat_template:
-            max_length = max(
-                max([len(x) for x in input_ids]), max([len(x) for x in contexts]) + self.tokens_to_generate
-            )
-        else:
-            max_length = max([len(x) for x in input_ids])
+        max_length = max(max([len(x) for x in input_ids]), max([len(x) for x in contexts]) + self.tokens_to_generate)
 
         if max_length > self.max_seq_length:
             # truncate the sequences if it is longer than max_seq_length
@@ -1106,9 +1106,8 @@ class GPTSFTChatDataset(GPTSFTDataset):
                         "Setting loss_mask to all ones."
                     )
                     loss_mask[i] = [1] * self.max_seq_length
-            if not self.use_hf_tokenizer_chat_template:
-                contexts = [x[: self.max_seq_length] for x in contexts]
-                answers = [x[: self.max_seq_length] for x in answers]
+            contexts = [x[: self.max_seq_length] for x in contexts]
+            answers = [x[: self.max_seq_length] for x in answers]
 
         # increase max length to nearest multiple of 4 or 8
         if self.pad_to_max_length:
