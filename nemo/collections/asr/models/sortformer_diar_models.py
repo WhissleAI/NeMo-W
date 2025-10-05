@@ -118,6 +118,9 @@ class SortformerEncLabelModel(ModelPT, ExportableEncDecModel, SpkDiarizationMixi
 
         self.async_streaming = self._cfg.get("async_streaming", False)
         self.streaming_mode = self._cfg.get("streaming_mode", False)
+        if self.streaming_mode:
+            # Validate streaming parameters once at initialization for streaming models
+            self.sortformer_modules._check_streaming_parameters()
         self.save_hyperparameters("cfg")
         self._init_eval_metrics()
         speaker_inds = list(range(self._cfg.max_num_of_spks))
@@ -808,6 +811,7 @@ class SortformerEncLabelModel(ModelPT, ExportableEncDecModel, SpkDiarizationMixi
         Returns:
             (dict): A dictionary containing the following training metrics.
         """
+        targets = targets.to(preds.dtype)
         if preds.shape[1] < targets.shape[1]:
             logging.info(
                 f"WARNING! preds has less frames than targets ({preds.shape[1]} < {targets.shape[1]}). "
@@ -880,6 +884,7 @@ class SortformerEncLabelModel(ModelPT, ExportableEncDecModel, SpkDiarizationMixi
         Returns:
             val_metrics (dict): A dictionary containing the following validation metrics
         """
+        targets = targets.to(preds.dtype)
         if preds.shape[1] < targets.shape[1]:
             logging.info(
                 f"WARNING! preds has less frames than targets ({preds.shape[1]} < {targets.shape[1]}). "
@@ -1011,6 +1016,7 @@ class SortformerEncLabelModel(ModelPT, ExportableEncDecModel, SpkDiarizationMixi
             target_lens (torch.Tensor): Lengths of target sequences.
                 Shape: (batch_size,)
         """
+        targets = targets.to(preds.dtype)
         if preds.shape[1] < targets.shape[1]:
             logging.info(
                 f"WARNING! preds has less frames than targets ({preds.shape[1]} < {targets.shape[1]}). "

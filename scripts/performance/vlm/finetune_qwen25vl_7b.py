@@ -16,13 +16,20 @@ from os.path import basename, splitext
 
 import nemo_run as run
 
+from nemo.collections.llm.recipes.precision.mixed_precision import bf16_with_fp8_mixed
 from nemo.collections.nlp.modules.common.tokenizer_utils import get_nmt_tokenizer
 from nemo.collections.vlm.recipes.qwen25vl_7b import finetune_recipe
-from nemo.lightning.run.plugins import NsysPlugin, PerfEnvPlugin
+from nemo.lightning.run.plugins import NsysPlugin
 
 from ..argument_parser import parse_cli_args
 from ..executors import slurm_executor
-from ..helpers import args_sanity_check, get_user_configs, set_exp_logging_configs, set_primary_perf_configs
+from ..helpers import (
+    args_sanity_check,
+    build_perf_env_plugin,
+    get_user_configs,
+    set_exp_logging_configs,
+    set_primary_perf_configs,
+)
 
 
 def override_recipe_configs(
@@ -63,6 +70,8 @@ def override_recipe_configs(
         use_mcore_fsdp=args.use_mcore_fsdp,
         use_fsdp_double_buffer=args.use_fsdp_double_buffer,
         use_user_buffer_registration=args.use_user_buffer_registration,
+        use_te_act_func=args.use_te_act_func,
+        act_func_fp8_input_store=args.act_func_fp8_input_store,
     )
 
     recipe = set_exp_logging_configs(
@@ -76,6 +85,13 @@ def override_recipe_configs(
         args.wandb_job_name,
     )
 
+    # compute dtype configs
+    if args.compute_dtype.lower() == "fp8":
+        recipe.trainer.plugins = bf16_with_fp8_mixed()
+        recipe.trainer.plugins.grad_reduce_in_fp32 = False
+
+    recipe.trainer.strategy.tensor_model_parallel_size = tp_size
+    recipe.trainer.strategy.pipeline_model_parallel_size = pp_size
     recipe.data.tokenizer = run.Config(
         get_nmt_tokenizer, library="null", model_name="NullTokenizer", vocab_size=152064
     )
@@ -113,13 +129,8 @@ if __name__ == "__main__":
         wandb_key=args.wandb_key,
     )
 
-    plugins = [
-        PerfEnvPlugin(
-            enable_vboost=True,
-            nccl_pp_comm_chunksize=2097152 if pp_size > 1 else None,
-            gpu_sm100_or_newer=(args.gpu.lower() in ['b200', 'gb200']),
-        )
-    ]
+    plugins = [build_perf_env_plugin(args, pp_size=pp_size)]
+
     if args.enable_nsys:
         plugins.append(NsysPlugin(start_step=5, end_step=6))
 
@@ -132,6 +143,6 @@ if __name__ == "__main__":
         )
 
         if not args.dryrun:
-            exp.run(sequential=True, detach=True)
+            exp.run(sequential=True, detach=args.detach)
         else:
             exp.dryrun()
