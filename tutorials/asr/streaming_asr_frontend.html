@@ -1,0 +1,881 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Streaming ASR Demo</title>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Space+Grotesk:wght@400;500;600;700&display=swap');
+        
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: 'Space Grotesk', sans-serif;
+            background: linear-gradient(135deg, #0f0f23 0%, #1a1a3e 50%, #0d0d1a 100%);
+            min-height: 100vh;
+            color: #e0e0e0;
+            padding: 20px;
+        }
+        
+        .container {
+            max-width: 900px;
+            margin: 0 auto;
+        }
+        
+        header {
+            text-align: center;
+            margin-bottom: 40px;
+            padding: 30px;
+            background: rgba(255, 255, 255, 0.03);
+            border-radius: 20px;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+        
+        h1 {
+            font-size: 2.5rem;
+            font-weight: 700;
+            background: linear-gradient(90deg, #00d4ff, #7b2fff, #ff2d92);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+            margin-bottom: 10px;
+        }
+        
+        .subtitle {
+            color: #888;
+            font-size: 1.1rem;
+        }
+        
+        .controls {
+            display: flex;
+            gap: 15px;
+            justify-content: center;
+            margin-bottom: 30px;
+            flex-wrap: wrap;
+        }
+        
+        button {
+            font-family: 'Space Grotesk', sans-serif;
+            padding: 15px 35px;
+            font-size: 1rem;
+            font-weight: 600;
+            border: none;
+            border-radius: 12px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        
+        .btn-record {
+            background: linear-gradient(135deg, #ff2d92, #ff6b6b);
+            color: white;
+            box-shadow: 0 4px 20px rgba(255, 45, 146, 0.3);
+        }
+        
+        .btn-record:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 25px rgba(255, 45, 146, 0.4);
+        }
+        
+        .btn-record.recording {
+            background: linear-gradient(135deg, #ff6b6b, #ff2d2d);
+            animation: pulse 1.5s infinite;
+        }
+        
+        .btn-stop {
+            background: linear-gradient(135deg, #555, #333);
+            color: white;
+        }
+        
+        .btn-stop:hover {
+            background: linear-gradient(135deg, #666, #444);
+        }
+        
+        .btn-upload {
+            background: linear-gradient(135deg, #00d4ff, #0099cc);
+            color: white;
+            box-shadow: 0 4px 20px rgba(0, 212, 255, 0.3);
+        }
+        
+        .btn-upload:hover {
+            transform: translateY(-2px);
+        }
+        
+        @keyframes pulse {
+            0%, 100% { box-shadow: 0 4px 20px rgba(255, 45, 146, 0.3); }
+            50% { box-shadow: 0 4px 30px rgba(255, 45, 146, 0.6); }
+        }
+        
+        .status {
+            text-align: center;
+            margin-bottom: 20px;
+            padding: 15px;
+            border-radius: 10px;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.9rem;
+        }
+        
+        .status.connected {
+            background: rgba(0, 255, 136, 0.1);
+            border: 1px solid rgba(0, 255, 136, 0.3);
+            color: #00ff88;
+        }
+        
+        .status.disconnected {
+            background: rgba(255, 100, 100, 0.1);
+            border: 1px solid rgba(255, 100, 100, 0.3);
+            color: #ff6464;
+        }
+        
+        .status.recording {
+            background: rgba(255, 45, 146, 0.1);
+            border: 1px solid rgba(255, 45, 146, 0.3);
+            color: #ff2d92;
+        }
+        
+        .transcription-box {
+            background: rgba(0, 0, 0, 0.4);
+            border-radius: 16px;
+            padding: 25px;
+            margin-bottom: 25px;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            min-height: 200px;
+        }
+        
+        .transcription-box h3 {
+            color: #00d4ff;
+            margin-bottom: 15px;
+            font-size: 1rem;
+            text-transform: uppercase;
+            letter-spacing: 2px;
+        }
+        
+        .transcription-text {
+            font-size: 1.3rem;
+            line-height: 1.8;
+            color: #fff;
+            min-height: 100px;
+            word-wrap: break-word;
+        }
+        
+        .transcription-text .entity {
+            background: linear-gradient(135deg, rgba(123, 47, 255, 0.3), rgba(123, 47, 255, 0.1));
+            padding: 2px 8px;
+            border-radius: 4px;
+            color: #b388ff;
+            font-weight: 500;
+        }
+        
+        /* Finalized text - committed from buffer overflow, very dim */
+        .transcription-text .finalized {
+            color: #666;
+        }
+        
+        /* Displayed text - stable, already shown */
+        .transcription-text .displayed {
+            color: #e0e0e0;
+        }
+        
+        /* Live text - new/changing portion, bright */
+        .transcription-text .live {
+            color: #00ff88;
+            text-shadow: 0 0 10px rgba(0, 255, 136, 0.4);
+        }
+        
+        .transcription-text .end-tag {
+            color: #888;
+            font-size: 0.9em;
+        }
+        
+        .metadata-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+            gap: 15px;
+            margin-top: 20px;
+        }
+        
+        .metadata-card {
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 12px;
+            padding: 20px;
+            text-align: center;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            transition: all 0.3s ease;
+        }
+        
+        .metadata-card:hover {
+            transform: translateY(-3px);
+            border-color: rgba(255, 255, 255, 0.2);
+        }
+        
+        .metadata-card .label {
+            font-size: 0.75rem;
+            text-transform: uppercase;
+            letter-spacing: 2px;
+            color: #666;
+            margin-bottom: 8px;
+        }
+        
+        .metadata-card .value {
+            font-size: 1.1rem;
+            font-weight: 600;
+            font-family: 'JetBrains Mono', monospace;
+        }
+        
+        .metadata-card.age .value { color: #00d4ff; }
+        .metadata-card.gender .value { color: #7b2fff; }
+        .metadata-card.emotion .value { color: #ff2d92; }
+        .metadata-card.intent .value { color: #00ff88; }
+        
+        .config-section {
+            background: rgba(255, 255, 255, 0.03);
+            border-radius: 12px;
+            padding: 20px;
+            margin-bottom: 25px;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+        
+        .config-section h4 {
+            margin-bottom: 15px;
+            color: #888;
+            font-size: 0.9rem;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+        
+        .config-row {
+            display: flex;
+            gap: 15px;
+            align-items: center;
+            flex-wrap: wrap;
+        }
+        
+        .config-row label {
+            color: #aaa;
+            font-size: 0.9rem;
+        }
+        
+        .config-row input {
+            font-family: 'JetBrains Mono', monospace;
+            padding: 10px 15px;
+            border-radius: 8px;
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            background: rgba(0, 0, 0, 0.3);
+            color: #fff;
+            font-size: 0.9rem;
+            width: 250px;
+        }
+        
+        .config-row input:focus {
+            outline: none;
+            border-color: #00d4ff;
+        }
+        
+        .visualizer {
+            height: 60px;
+            background: rgba(0, 0, 0, 0.3);
+            border-radius: 10px;
+            margin-bottom: 20px;
+            overflow: hidden;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 3px;
+            padding: 0 20px;
+        }
+        
+        .visualizer-bar {
+            width: 4px;
+            background: linear-gradient(180deg, #00d4ff, #7b2fff);
+            border-radius: 2px;
+            transition: height 0.1s ease;
+        }
+        
+        .duration {
+            text-align: center;
+            font-family: 'JetBrains Mono', monospace;
+            color: #666;
+            margin-bottom: 20px;
+        }
+        
+        .duration span {
+            color: #00d4ff;
+            font-size: 1.5rem;
+        }
+        
+        footer {
+            text-align: center;
+            margin-top: 40px;
+            color: #555;
+            font-size: 0.85rem;
+        }
+        
+        #file-input {
+            display: none;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>🎙️ Streaming ASR</h1>
+            <p class="subtitle">Real-time Speech Recognition with Entity & Metadata Detection</p>
+        </header>
+        
+        <div class="config-section">
+            <h4>⚙️ Configuration</h4>
+            <div class="config-row">
+                <label>WebSocket URL:</label>
+                <input type="text" id="ws-url" value="wss://audio.whissle.ai/listen/session1" placeholder="wss://audio.whissle.ai/listen/{session_id}">
+                <button class="btn-stop" onclick="connect()">Connect</button>
+            </div>
+            <div class="config-row" style="margin-top: 12px;">
+                <label>Chunk (s):</label>
+                <input type="number" id="chunk-duration" value="1.6" min="0.5" max="3" step="0.1" style="width: 80px;" onchange="updateConfig()">
+                <label>Buffer (s):</label>
+                <input type="number" id="buffer-duration" value="6" min="3" max="20" step="1" style="width: 80px;" onchange="updateConfig()">
+                <label>Min Audio (s):</label>
+                <input type="number" id="min-audio" value="1.0" min="0.5" max="3" step="0.5" style="width: 80px;" onchange="updateConfig()">
+            </div>
+            <div style="margin-top: 8px; font-size: 0.8rem; color: #666;">
+                <span>Chunk: how often to send audio • Buffer: left context (max audio kept) • Min Audio: wait before transcribing</span>
+            </div>
+        </div>
+        
+        <div id="status" class="status disconnected">● Disconnected</div>
+        
+        <div class="visualizer" id="visualizer">
+            <!-- Audio visualization bars will be added here -->
+        </div>
+        
+        <div class="duration">
+            Duration: <span id="duration">0.0</span>s
+        </div>
+        
+        <div class="controls">
+            <button class="btn-record" id="record-btn" onclick="toggleRecording()">
+                <span>🎤</span> Start Recording
+            </button>
+            <button class="btn-stop" onclick="stopAndReset()">
+                <span>⏹️</span> Reset
+            </button>
+            <button class="btn-upload" onclick="document.getElementById('file-input').click()">
+                <span>📁</span> Upload File
+            </button>
+            <input type="file" id="file-input" accept="audio/*" onchange="uploadFile(event)">
+        </div>
+        
+        <div class="transcription-box">
+            <h3>📝 Transcription</h3>
+            <div class="transcription-text" id="transcription">
+                <span style="color: #555; font-style: italic;">Start recording or upload a file to see transcription...</span>
+            </div>
+        </div>
+        
+        <div class="transcription-box">
+            <h3>🏷️ Detected Metadata</h3>
+            <div class="metadata-grid">
+                <div class="metadata-card age">
+                    <div class="label">Age</div>
+                    <div class="value" id="meta-age">—</div>
+                </div>
+                <div class="metadata-card gender">
+                    <div class="label">Gender</div>
+                    <div class="value" id="meta-gender">—</div>
+                </div>
+                <div class="metadata-card emotion">
+                    <div class="label">Emotion</div>
+                    <div class="value" id="meta-emotion">—</div>
+                </div>
+                <div class="metadata-card intent">
+                    <div class="label">Intent</div>
+                    <div class="value" id="meta-intent">—</div>
+                </div>
+            </div>
+        </div>
+        
+        <footer>
+            Streaming ASR Demo • NeMo CTC Model with Metadata Tags
+        </footer>
+    </div>
+    
+    <script>
+        // ============================================================
+        // Configuration
+        // ============================================================
+        const SAMPLE_RATE = 16000;
+        
+        // Streaming parameters (configurable)
+        let CHUNK_DURATION = 1.6;  // seconds - how often to send audio
+        let BUFFER_DURATION = 6;   // seconds - left context (how much audio server keeps)
+        let MIN_AUDIO = 1.0;       // seconds - minimum audio before transcription starts
+        
+        // Derived
+        let CHUNK_SIZE = Math.floor(CHUNK_DURATION * SAMPLE_RATE);  // samples per chunk
+        
+        // ============================================================
+        // State
+        // ============================================================
+        let ws = null;
+        let isRecording = false;
+        let audioContext = null;
+        let mediaStream = null;
+        let processor = null;
+        let analyser = null;
+        let recordingStartTime = null;
+        let durationInterval = null;
+        
+        // ============================================================
+        // Visualizer
+        // ============================================================
+        function initVisualizer() {
+            const visualizer = document.getElementById('visualizer');
+            visualizer.innerHTML = '';
+            for (let i = 0; i < 50; i++) {
+                const bar = document.createElement('div');
+                bar.className = 'visualizer-bar';
+                bar.style.height = '5px';
+                visualizer.appendChild(bar);
+            }
+        }
+        
+        function updateVisualizer(dataArray) {
+            const bars = document.querySelectorAll('.visualizer-bar');
+            const step = Math.floor(dataArray.length / bars.length);
+            
+            bars.forEach((bar, i) => {
+                const value = dataArray[i * step] || 0;
+                const height = Math.max(5, (value / 255) * 50);
+                bar.style.height = height + 'px';
+            });
+        }
+        
+        initVisualizer();
+        
+        // ============================================================
+        // Configuration
+        // ============================================================
+        function updateConfig() {
+            CHUNK_DURATION = parseFloat(document.getElementById('chunk-duration').value) || 0.5;
+            BUFFER_DURATION = parseFloat(document.getElementById('buffer-duration').value) || 12;
+            MIN_AUDIO = parseFloat(document.getElementById('min-audio').value) || 1.0;
+            CHUNK_SIZE = Math.floor(CHUNK_DURATION * SAMPLE_RATE);
+            
+            // Send config to server if connected
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({
+                    config: {
+                        buffer_duration: BUFFER_DURATION,
+                        min_audio_for_transcription: MIN_AUDIO
+                    }
+                }));
+            }
+            
+            console.log(`Config updated: chunk=${CHUNK_DURATION}s, buffer=${BUFFER_DURATION}s, minAudio=${MIN_AUDIO}s`);
+        }
+        
+        // ============================================================
+        // WebSocket Connection
+        // ============================================================
+        function connect() {
+            const url = document.getElementById('ws-url').value;
+            
+            if (ws) {
+                ws.close();
+            }
+            
+            // Read config values
+            updateConfig();
+            
+            updateStatus('connecting', '● Connecting...');
+            
+            ws = new WebSocket(url);
+            
+            ws.onopen = () => {
+                updateStatus('connected', '● Connected');
+                console.log('WebSocket connected');
+                
+                // Send initial configuration
+                ws.send(JSON.stringify({
+                    config: {
+                        buffer_duration: BUFFER_DURATION,
+                        min_audio_for_transcription: MIN_AUDIO
+                    }
+                }));
+            };
+            
+            ws.onmessage = (event) => {
+                const data = JSON.parse(event.data);
+                updateTranscription(data);
+            };
+            
+            ws.onclose = () => {
+                updateStatus('disconnected', '● Disconnected');
+                console.log('WebSocket closed');
+            };
+            
+            ws.onerror = (error) => {
+                updateStatus('disconnected', '● Connection Error');
+                console.error('WebSocket error:', error);
+            };
+        }
+        
+        function updateStatus(type, text) {
+            const status = document.getElementById('status');
+            status.className = 'status ' + type;
+            status.textContent = text;
+        }
+        
+        // ============================================================
+        // Recording
+        // ============================================================
+        async function toggleRecording() {
+            if (isRecording) {
+                stopRecording();
+            } else {
+                await startRecording();
+            }
+        }
+        
+        async function startRecording() {
+            if (!ws || ws.readyState !== WebSocket.OPEN) {
+                alert('Please connect to the server first!');
+                return;
+            }
+            
+            try {
+                mediaStream = await navigator.mediaDevices.getUserMedia({ 
+                    audio: {
+                        sampleRate: SAMPLE_RATE,
+                        channelCount: 1,
+                        echoCancellation: true,
+                        noiseSuppression: true
+                    }
+                });
+                
+                audioContext = new AudioContext({ sampleRate: SAMPLE_RATE });
+                const source = audioContext.createMediaStreamSource(mediaStream);
+                
+                // Analyzer for visualization
+                analyser = audioContext.createAnalyser();
+                analyser.fftSize = 256;
+                source.connect(analyser);
+                
+                // Processor for sending audio
+                // ScriptProcessor needs power of 2 buffer size, so we accumulate samples
+                const processorBufferSize = 4096;  // Fixed for ScriptProcessor
+                let audioAccumulator = new Float32Array(0);
+                
+                processor = audioContext.createScriptProcessor(processorBufferSize, 1, 1);
+                source.connect(processor);
+                processor.connect(audioContext.destination);
+                
+                // Target chunk size based on config
+                const targetChunkSamples = Math.floor(CHUNK_DURATION * SAMPLE_RATE);
+                
+                processor.onaudioprocess = (e) => {
+                    if (!isRecording) return;
+                    
+                    const inputData = e.inputBuffer.getChannelData(0);
+                    
+                    // Accumulate audio samples
+                    const newAccumulator = new Float32Array(audioAccumulator.length + inputData.length);
+                    newAccumulator.set(audioAccumulator);
+                    newAccumulator.set(inputData, audioAccumulator.length);
+                    audioAccumulator = newAccumulator;
+                    
+                    // Send when we have enough samples (based on CHUNK_DURATION)
+                    if (audioAccumulator.length >= targetChunkSamples) {
+                        // Convert to int16
+                        const int16Data = new Int16Array(audioAccumulator.length);
+                        for (let i = 0; i < audioAccumulator.length; i++) {
+                            int16Data[i] = Math.max(-32768, Math.min(32767, audioAccumulator[i] * 32768));
+                        }
+                        
+                        // Send to server
+                        if (ws && ws.readyState === WebSocket.OPEN) {
+                            ws.send(int16Data.buffer);
+                        }
+                        
+                        // Reset accumulator
+                        audioAccumulator = new Float32Array(0);
+                    }
+                    
+                    // Update visualizer
+                    const dataArray = new Uint8Array(analyser.frequencyBinCount);
+                    analyser.getByteFrequencyData(dataArray);
+                    updateVisualizer(dataArray);
+                };
+                
+                isRecording = true;
+                recordingStartTime = Date.now();
+                
+                // Update UI
+                const btn = document.getElementById('record-btn');
+                btn.classList.add('recording');
+                btn.innerHTML = '<span>⏸️</span> Stop Recording';
+                updateStatus('recording', '● Recording...');
+                
+                // Duration counter
+                durationInterval = setInterval(() => {
+                    const elapsed = (Date.now() - recordingStartTime) / 1000;
+                    document.getElementById('duration').textContent = elapsed.toFixed(1);
+                }, 100);
+                
+            } catch (error) {
+                console.error('Error starting recording:', error);
+                alert('Could not access microphone: ' + error.message);
+            }
+        }
+        
+        function stopRecording() {
+            isRecording = false;
+            
+            // Send FINALIZE to commit any remaining text
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send('FINALIZE');
+            }
+            
+            if (processor) {
+                processor.disconnect();
+                processor = null;
+            }
+            
+            if (mediaStream) {
+                mediaStream.getTracks().forEach(track => track.stop());
+                mediaStream = null;
+            }
+            
+            if (audioContext) {
+                audioContext.close();
+                audioContext = null;
+            }
+            
+            if (durationInterval) {
+                clearInterval(durationInterval);
+                durationInterval = null;
+            }
+            
+            // Update UI
+            const btn = document.getElementById('record-btn');
+            btn.classList.remove('recording');
+            btn.innerHTML = '<span>🎤</span> Start Recording';
+            updateStatus('connected', '● Stopped');
+            
+            // Reset visualizer
+            document.querySelectorAll('.visualizer-bar').forEach(bar => {
+                bar.style.height = '5px';
+            });
+        }
+        
+        function stopAndReset() {
+            stopRecording();
+            
+            // Reset finalized text tracking
+            finalizedText = '';
+            
+            // Reset transcription display
+            document.getElementById('transcription').innerHTML = 
+                '<span style="color: #555; font-style: italic;">Start recording or upload a file to see transcription...</span>';
+            document.getElementById('meta-age').textContent = '—';
+            document.getElementById('meta-gender').textContent = '—';
+            document.getElementById('meta-emotion').textContent = '—';
+            document.getElementById('meta-intent').textContent = '—';
+            document.getElementById('duration').textContent = '0.0';
+            
+            // Send reset command to server
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send('RESET');
+            }
+        }
+        
+        // ============================================================
+        // File Upload
+        // ============================================================
+        async function uploadFile(event) {
+            const file = event.target.files[0];
+            if (!file) return;
+            
+            const httpUrl = document.getElementById('ws-url').value
+                .replace('ws://', 'http://')
+                .replace('wss://', 'https://')
+                .replace(/\/listen\/.*$/, '/transcribe');
+            
+            const formData = new FormData();
+            formData.append('file', file);
+            
+            updateStatus('recording', '● Processing file...');
+            
+            try {
+                const response = await fetch(httpUrl, {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                if (!response.ok) {
+                    throw new Error('Server error: ' + response.status);
+                }
+                
+                const data = await response.json();
+                updateTranscription(data);
+                updateStatus('connected', '● File processed');
+                document.getElementById('duration').textContent = data.duration?.toFixed(1) || '0.0';
+                
+            } catch (error) {
+                console.error('Upload error:', error);
+                alert('Error uploading file: ' + error.message);
+                updateStatus('disconnected', '● Error');
+            }
+            
+            // Clear file input
+            event.target.value = '';
+        }
+        
+        // ============================================================
+        // Update UI - Finalized + Live display
+        // ============================================================
+        function escapeHtml(text) {
+            if (!text) return '';
+            return text
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#039;');
+        }
+        
+        function cleanText(text) {
+            if (!text) return '';
+            return text
+                .replace(/\bAGE_\w*/g, '')
+                .replace(/\bGENDER_\w*/g, '')
+                .replace(/\bEMOTION_\w*/g, '')
+                .replace(/\bINTENT_\w*/g, '')
+                .replace(/\bSPEAKER\w*/g, '')
+                .replace(/\b\d+_\d+\b/g, '')
+                .replace(/\s+/g, ' ')
+                .trim();
+        }
+        
+        function highlightEntities(text) {
+            if (!text) return '';
+            return text
+                .replace(/(ENTITY_\w+)/g, '<span class="entity">$1</span>')
+                .replace(/\b(END)\b/g, '<span class="end-tag">$1</span>');
+        }
+        
+        // Track finalized text separately (persists across updates)
+        let finalizedText = '';
+        
+        function updateTranscription(data) {
+            let displayHtml = '';
+            
+            // New structured response format
+            if (data.transcript !== undefined) {
+                const finalized = data.finalized || '';
+                const current = data.transcript || '';
+                const entitiesText = data.transcript_with_entities || '';
+                
+                // Update tracked finalized text
+                if (finalized && finalized.length > finalizedText.length) {
+                    finalizedText = finalized;
+                }
+                
+                // Build display: finalized (dim) + current with entities (bright)
+                if (finalizedText) {
+                    displayHtml += '<span class="finalized">' + escapeHtml(finalizedText) + '</span> ';
+                }
+                
+                // Show current text with entity highlighting
+                if (entitiesText) {
+                    displayHtml += '<span class="live">' + highlightEntities(entitiesText) + '</span>';
+                } else if (current) {
+                    displayHtml += '<span class="live">' + escapeHtml(current) + '</span>';
+                }
+                
+                // Show stability indicator
+                if (data.is_stable) {
+                    displayHtml += ' <span style="color: #4caf50; font-size: 0.8em;">✓</span>';
+                }
+                
+                if (data.buffer_duration !== undefined) {
+                    document.getElementById('duration').textContent = data.buffer_duration.toFixed(1);
+                }
+                
+                // Display entities in console for debugging
+                if (data.entities && data.entities.length > 0) {
+                    console.log('Entities:', data.entities);
+                }
+            } 
+            // Legacy/fallback mode (current field)
+            else if (data.current !== undefined) {
+                const finalized = cleanText(data.finalized || '');
+                const current = cleanText(data.current || '');
+                
+                if (finalized && finalized.length > finalizedText.length) {
+                    finalizedText = finalized;
+                }
+                
+                if (finalizedText) {
+                    displayHtml += '<span class="finalized">' + highlightEntities(finalizedText) + '</span> ';
+                }
+                if (current) {
+                    displayHtml += '<span class="live">' + highlightEntities(current) + '</span>';
+                }
+                
+                if (data.buffer_duration !== undefined) {
+                    document.getElementById('duration').textContent = data.buffer_duration.toFixed(1);
+                }
+            } 
+            // File upload mode
+            else {
+                let text = cleanText(data.text_only || data.text || '');
+                displayHtml = highlightEntities(text);
+                
+                if (data.duration) {
+                    document.getElementById('duration').textContent = data.duration.toFixed(1);
+                }
+            }
+            
+            document.getElementById('transcription').innerHTML = displayHtml || 
+                '<span style="color: #555; font-style: italic;">Listening...</span>';
+            
+            // Update metadata boxes from structured metadata dict
+            const meta = data.metadata || {};
+            document.getElementById('meta-age').textContent = 
+                meta.age?.replace('AGE_', '').replace('_', '-') || '—';
+            document.getElementById('meta-gender').textContent = 
+                meta.gender?.replace('GENDER_', '') || '—';
+            document.getElementById('meta-emotion').textContent = 
+                meta.emotion?.replace('EMOTION_', '') || '—';
+            document.getElementById('meta-intent').textContent = 
+                meta.intent?.replace('INTENT_', '') || '—';
+            
+            // Show stability indicator
+            if (data.is_stable && isRecording) {
+                updateStatus('recording', '● Recording (stable)');
+            }
+            
+            // Log entities for debugging/integration
+            if (data.entities && data.entities.length > 0) {
+                console.log('Detected entities:', data.entities);
+                // Example entity: {type: "LOCATION", value: "London", raw: "ENTITY_LOCATION London END"}
+            }
+        }
+        
+        // ============================================================
+        // Auto-connect on load
+        // ============================================================
+        window.onload = () => {
+            // Try to connect automatically
+            setTimeout(connect, 500);
+        };
+    </script>
+</body>
+</html>
